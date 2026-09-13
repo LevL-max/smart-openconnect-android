@@ -1,0 +1,22 @@
+name: Remove legacy preview tag
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/remove-legacy-tag.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Remove superseded preview tag
+        run: git push origin :refs/tags/v0.2.0-ui-preview
