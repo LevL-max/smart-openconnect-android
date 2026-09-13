@@ -1,0 +1,2269 @@
+diff --git a/MVP_BUILD_STATUS.md b/MVP_BUILD_STATUS.md
+new file mode 100644
+index 0000000..d2bc6bd
+--- /dev/null
++++ b/MVP_BUILD_STATUS.md
+@@ -0,0 +1,49 @@
++# Smart OpenConnect 0.2 UI preview - build status
++
++Base: official OpenConnect for Android 1.12 source (`net.openconnect_vpn.android`, GPLv2+).
++
++## Implemented in the working source
++
++- Separate test application ID: `net.openconnect_vpn.android.smart`.
++- App label: `Smart OpenConnect`; version `0.1.0-mvp1`.
++- Fixed bottom navigation: **Connect / Servers / Log**.
++- FAQ / Settings / SecurID / About remain available from the overflow menu, including on the Connect screen.
++- Primary **Connect / Disconnect** button is fixed in the lower thumb zone immediately above bottom navigation.
++- Server list tap now selects a profile and returns to Connect instead of connecting immediately.
++- Per-profile **Smart Relay** checkbox, default ON.
++- Dynamic Smart Relay discovery:
++  - system DNS for the selected hostname;
++  - Google and Cloudflare DNS-over-HTTPS views;
++  - relay addresses learned from other configured Keenetic/Netcraze profiles;
++  - persistent locally cached relay pool across connection attempts.
++- Relay health probing in parallel using TCP + TLS with the original logical hostname as SNI.
++- Fastest TLS-healthy relay selected before OpenConnect authentication.
++- Native libopenconnect `getaddrinfo()` override pins the physical relay IP while preserving the original hostname for SNI / certificate processing / HTTP Host.
++- Selected relay is written to the normal VPN log and displayed on the Connect screen as the last relay.
++- If Smart Relay cannot find a healthy candidate, connection fails open to normal OpenConnect DNS behavior.
++- Internal broadcast/action names and FileProvider authority isolated for side-by-side testing.
++
++## Static validation completed
++
++- `git diff --check` passes.
++
++- `SmartRelaySelector.java` compiles with Java source/target 8.
++- Modified `LibOpenConnect.java` compiles with Java source/target 8.
++- Smart Relay endpoint/domain parser smoke tests pass with documentation-only examples.
++- All modified Android resource XML files parse successfully.
++- JNI integration was checked against OpenConnect 1.12's `openconnect_override_getaddrinfo()` callback contract. The callback receives the `libctx` supplied as OpenConnect cbdata, so logical-host-to-physical-IP pinning is valid by design.
++
++## Full APK build status
++
++A full APK has **not yet been produced in this sandbox** because the runtime does not contain an Android SDK/NDK or the prebuilt OpenConnect native artifacts. OpenConnect 1.12 requires Android SDK 35 / build-tools 34.0.0 and NDK r27c; this source also requires rebuilding `libopenconnect.so` because MVP1 adds one JNI method for Smart Relay.
++
++The source is ready for the native/Android build stage. The next build environment must run the upstream external dependency build and then Gradle assembleDebug.
++
++## MVP1 limitations to address after first device test
++
++- Relay selection pre-probes candidates, but does not yet automatically try the second-best relay inside the *same* authentication attempt if the selected relay dies between probe and connection. A new manual Connect attempt re-runs selection.
++- The relay pool is persistent and additive. Time-based aging/garbage collection and scored cooldown history are planned after first APK validation.
++- The Connect screen now uses a distinct dark Smart Connect visual system with live tunnel/relay IP and transfer statistics.
++- The large circular Connect/Disconnect control is deliberately positioned in the lower half directly above the fixed navigation, inside the one-handed thumb zone.
++- Servers have a dedicated card list and low, reachable selection flow. The working Smart Relay/OpenConnect backend is unchanged.
++- The launcher/QS tile icon is a new relay-path mark and does not reuse OpenConnect branding.
+diff --git a/app/build.gradle b/app/build.gradle
+index 6e81fa4..7ba7878 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -5,12 +5,13 @@ plugins {
+ android {
+     namespace "net.openconnect_vpn.android"
+     defaultConfig {
++        applicationId "net.openconnect_vpn.android.smart"
+         minSdk 23
+         targetSdk 34
+         compileSdk 35
+ 
+-        versionCode 1120
+-        versionName "1.12"
++        versionCode 2
++        versionName "0.2.0-ui-preview"
+         testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+     }
+     if (file("release.properties").exists()) {
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 606d896..9eeaadf 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -24,7 +24,8 @@
+     <application
+         android:allowBackup="true"
+         android:banner="@drawable/banner"
+-        android:icon="@drawable/ic_launcher"
++        android:icon="@drawable/ic_smartconnect_launcher"
++        android:roundIcon="@drawable/ic_smartconnect_launcher"
+         android:label="@string/app"
+         android:supportsRtl="true"
+         android:name="net.openconnect_vpn.android.Application"
+@@ -86,6 +87,7 @@
+         <activity
+             android:exported="true"
+             android:name=".MainActivity"
++            android:theme="@style/SmartConnectMainTheme"
+             android:uiOptions="splitActionBarWhenNarrow"
+             tools:ignore="ExportedActivity" >
+             <intent-filter>
+@@ -119,7 +121,7 @@
+             android:exported="true"
+             android:name=".QSTileService"
+             android:label="@string/app"
+-            android:icon="@drawable/ic_launcher"
++            android:icon="@drawable/ic_smartconnect_launcher"
+             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+             <intent-filter>
+                 <action android:name="android.service.quicksettings.action.QS_TILE"/>
+@@ -127,16 +129,14 @@
+         </service>
+ 
+         <activity
+-            android:exported="true"
+-            android:permission="net.openconnect_vpn.android.REMOTE_API"
++            android:exported="false"
+             android:name=".api.GrantPermissionsActivity">
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+             </intent-filter>
+         </activity>
+         <activity
+-            android:exported="true"
+-            android:permission="net.openconnect_vpn.android.REMOTE_API"
++            android:exported="false"
+             android:name=".api.ConfirmDialog" >
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+@@ -153,7 +153,7 @@
+ 
+         <provider
+             android:name=".FileProvider"
+-            android:authorities="net.openconnect_vpn.android.FileProvider"
++            android:authorities="${applicationId}.FileProvider"
+             android:exported="true"
+             android:grantUriPermissions="true"
+             tools:ignore="ExportedContentProvider" />
+diff --git a/app/src/main/java/net/openconnect_vpn/android/MainActivity.java b/app/src/main/java/net/openconnect_vpn/android/MainActivity.java
+index 36f74de..a5c5359 100644
+--- a/app/src/main/java/net/openconnect_vpn/android/MainActivity.java
++++ b/app/src/main/java/net/openconnect_vpn/android/MainActivity.java
+@@ -1,193 +1,141 @@
+ /*
+- * Adapted from OpenVPN for Android
+- * Copyright (c) 2012-2013, Arne Schwabe
+- * Copyright (c) 2013, Kevin Cernekee
+- * All rights reserved.
+- *
+- * This program is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU General Public License
+- * as published by the Free Software Foundation; either version 2
+- * of the License, or (at your option) any later version.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
+- * USA.
+- *
+- * In addition, as a special exception, the copyright holders give
+- * permission to link the code of portions of this program with the
+- * OpenSSL library.
++ * Smart OpenConnect MVP main activity.
++ * Based on OpenConnect for Android (GPLv2+).
+  */
+-
+ package net.openconnect_vpn.android;
+ 
+-import java.util.ArrayList;
+-
+-import android.app.ActionBar;
+-import android.app.ActionBar.Tab;
+ import android.app.Activity;
+ import android.app.Fragment;
+-import android.app.FragmentTransaction;
++import android.content.Intent;
++import android.graphics.Color;
+ import android.os.Bundle;
+-import net.openconnect_vpn.android.core.OpenConnectManagementThread;
++import android.view.View;
++import android.widget.ImageButton;
++import android.widget.TextView;
++
+ import net.openconnect_vpn.android.core.OpenVpnService;
+ import net.openconnect_vpn.android.core.VPNConnector;
+-import net.openconnect_vpn.android.fragments.*;
++import net.openconnect_vpn.android.fragments.ConnectFragment;
++import net.openconnect_vpn.android.fragments.FeedbackFragment;
++import net.openconnect_vpn.android.fragments.LogFragment;
++import net.openconnect_vpn.android.fragments.VPNProfileList;
+ 
+ public class MainActivity extends Activity {
+-
+-	public static final String TAG = "OpenConnect";
+-
+-	private ActionBar mBar;
+-
+-	private ArrayList<TabContainer> mTabList = new ArrayList<TabContainer>();
+-
+-	private TabContainer mConnectionTab;
+-	private int mLastTab;
+-	private boolean mTabsActive;
+-
+-	private int mConnectionState = OpenConnectManagementThread.STATE_DISCONNECTED;
+-	private VPNConnector mConn;
+-
+-	@Override
+-	protected void onCreate(Bundle savedInstanceState) {
+-
+-		super.onCreate(savedInstanceState);
+-
+-		mTabsActive = false;
+-		if (savedInstanceState != null) {
+-			mLastTab = savedInstanceState.getInt("active_tab");
+-		}
+-
+-		mBar = getActionBar();
+-		mBar.setNavigationMode(ActionBar.NAVIGATION_MODE_TABS);
+-
+-		mTabList.add(new TabContainer(0, R.string.vpn_list_title, new VPNProfileList()));
+-		mTabList.add(new TabContainer(1, R.string.log, new LogFragment()));
+-		mTabList.add(new TabContainer(2, R.string.faq, new FaqFragment()));
+-
+-		mConnectionTab = mTabList.get(0);
+-
+-		FeedbackFragment.recordUse(this, false);
+-	}
+-
+-	@Override
+-	protected void onSaveInstanceState(Bundle b) {
+-		super.onSaveInstanceState(b);
+-		b.putInt("active_tab", mLastTab);
+-	}
+-
+-	private void updateUI(OpenVpnService service) {
+-		int newState = service.getConnectionState();
+-
+-		service.startActiveDialog(this);
+-
+-		if (mConnectionState != newState) {
+-			if (newState == OpenConnectManagementThread.STATE_DISCONNECTED) {
+-				mConnectionTab.replace(R.string.vpn_list_title, new VPNProfileList());
+-			} else if (mConnectionState == OpenConnectManagementThread.STATE_DISCONNECTED) {
+-				mConnectionTab.replace(R.string.status, new StatusFragment());
+-			}
+-			mConnectionState = newState;
+-		}
+-
+-		if (!mTabsActive) {
+-			// NOTE: addTab may cause mLastTab to change, so cache the value here
+-			int lastTab = mLastTab;
+-			for (TabContainer tc : mTabList) {
+-				mBar.addTab(tc.tab);
+-				if (tc.idx == lastTab) {
+-					mBar.selectTab(tc.tab);
+-				}
+-			}
+-			mTabsActive = true;
+-		}
+-	}
+-
+-	@Override
+-	protected void onResume() {
+-		super.onResume();
+-
+-		mConn = new VPNConnector(this, true) {
+-			@Override
+-			public void onUpdate(OpenVpnService service) {
+-				updateUI(service);
+-			}
+-		};
+-	}
+-
+-	@Override
+-	protected void onPause() {
+-		mConn.stopActiveDialog();
+-		mConn.unbind();
+-		super.onPause();
+-	}
+-
+-	protected class TabContainer implements ActionBar.TabListener {
+-		private Fragment mFragment;
+-		private boolean mActive;
+-		public Tab tab;
+-		public int idx;
+-
+-		public void replace(int titleResId, Fragment frag) {
+-			if (mActive) {
+-				getFragmentManager().beginTransaction().remove(mFragment).commit();
+-			}
+-
+-			mFragment = frag;
+-			tab.setText(titleResId);
+-
+-			if (idx == mLastTab) {
+-				getFragmentManager().beginTransaction()
+-					.setCustomAnimations(R.animator.fade_in, R.animator.fade_out)
+-					.replace(android.R.id.content, mFragment)
+-					.commit();
+-				mActive = true;
+-			} else {
+-				mActive = false;
+-			}
+-		}
+-
+-		public TabContainer(int idx, int titleResId, Fragment frag) {
+-			this.idx = idx;
+-			this.mFragment = frag;
+-			tab = getActionBar().newTab()
+-					.setText(titleResId)
+-					.setTabListener(this);
+-		}
+-
+-		@Override
+-		public void onTabSelected(Tab tab, FragmentTransaction ft) {
+-			if (mTabsActive) {
+-				if (idx < mLastTab) {
+-					ft.setCustomAnimations(R.animator.fragment_slide_right_enter,
+-							R.animator.fragment_slide_right_exit);
+-				} else if (idx > mLastTab) {
+-					ft.setCustomAnimations(R.animator.fragment_slide_left_enter,
+-							R.animator.fragment_slide_left_exit);
+-				}
+-			}
+-
+-			mLastTab = idx;
+-			ft.replace(android.R.id.content, mFragment);
+-			mActive = true;
+-		}
+-
+-		@Override
+-		public void onTabUnselected(Tab tab, FragmentTransaction ft) {
+-			if (mActive) {
+-				ft.remove(mFragment);
+-				mActive = false;
+-			}
+-		}
+-
+-		@Override
+-		public void onTabReselected(Tab tab, FragmentTransaction ft) {
+-		}
+-	}
++    public static final String TAG = "OpenConnect";
++
++    public static final int TAB_CONNECT = 0;
++    public static final int TAB_SERVERS = 1;
++    public static final int TAB_LOG = 2;
++
++    private int mLastTab = TAB_CONNECT;
++    private VPNConnector mConn;
++    private View mConnectNav;
++    private View mServersNav;
++    private View mLogNav;
++    private TextView mConnectNavLabel;
++    private TextView mServersNavLabel;
++    private TextView mLogNavLabel;
++
++    @Override
++    protected void onCreate(Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++        setContentView(R.layout.main_activity);
++
++        if (savedInstanceState != null)
++            mLastTab = savedInstanceState.getInt("active_tab", TAB_CONNECT);
++
++        mConnectNav = findViewById(R.id.nav_connect);
++        mServersNav = findViewById(R.id.nav_servers);
++        mLogNav = findViewById(R.id.nav_log);
++        mConnectNavLabel = (TextView)findViewById(R.id.nav_connect_label);
++        mServersNavLabel = (TextView)findViewById(R.id.nav_servers_label);
++        mLogNavLabel = (TextView)findViewById(R.id.nav_log_label);
++
++        ((ImageButton)findViewById(R.id.main_settings)).setOnClickListener(new View.OnClickListener() {
++            @Override public void onClick(View v) {
++                Intent intent = new Intent(MainActivity.this, FragActivity.class);
++                intent.putExtra(FragActivity.EXTRA_FRAGMENT_NAME, "GeneralSettings");
++                startActivity(intent);
++            }
++        });
++
++        mConnectNav.setOnClickListener(new View.OnClickListener() {
++            @Override public void onClick(View v) { showConnectTab(); }
++        });
++        mServersNav.setOnClickListener(new View.OnClickListener() {
++            @Override public void onClick(View v) { showServersTab(); }
++        });
++        mLogNav.setOnClickListener(new View.OnClickListener() {
++            @Override public void onClick(View v) { showLogTab(); }
++        });
++
++        if (savedInstanceState == null)
++            showTab(mLastTab);
++        else
++            updateBottomNav();
++
++        FeedbackFragment.recordUse(this, false);
++    }
++
++    @Override
++    protected void onSaveInstanceState(Bundle b) {
++        super.onSaveInstanceState(b);
++        b.putInt("active_tab", mLastTab);
++    }
++
++    private Fragment fragmentFor(int tab) {
++        switch (tab) {
++        case TAB_SERVERS: return new VPNProfileList();
++        case TAB_LOG: return new LogFragment();
++        case TAB_CONNECT:
++        default: return new ConnectFragment();
++        }
++    }
++
++    private void showTab(int tab) {
++        mLastTab = tab;
++        getFragmentManager().beginTransaction()
++            .setCustomAnimations(R.animator.fade_in, R.animator.fade_out)
++            .replace(R.id.main_content, fragmentFor(tab))
++            .commit();
++        updateBottomNav();
++    }
++
++    private void updateBottomNav() {
++        if (mConnectNav == null) return;
++        styleNav(mConnectNav, mConnectNavLabel, mLastTab == TAB_CONNECT);
++        styleNav(mServersNav, mServersNavLabel, mLastTab == TAB_SERVERS);
++        styleNav(mLogNav, mLogNavLabel, mLastTab == TAB_LOG);
++    }
++
++    private void styleNav(View item, TextView label, boolean selected) {
++        item.setBackgroundResource(selected ? R.drawable.nav_item_selected : R.drawable.nav_item_normal);
++        label.setTextColor(Color.parseColor(selected ? "#F5F3FF" : "#8F93AD"));
++        item.setSelected(selected);
++    }
++
++    public void showConnectTab() { showTab(TAB_CONNECT); }
++    public void showServersTab() { showTab(TAB_SERVERS); }
++    public void showLogTab() { showTab(TAB_LOG); }
++
++    @Override
++    protected void onResume() {
++        super.onResume();
++        mConn = new VPNConnector(this, true) {
++            @Override public void onUpdate(OpenVpnService service) {
++                // Keep auth/certificate dialogs attached to the visible activity.
++                service.startActiveDialog(MainActivity.this);
++            }
++        };
++    }
++
++    @Override
++    protected void onPause() {
++        if (mConn != null) {
++            mConn.stopActiveDialog();
++            mConn.unbind();
++            mConn = null;
++        }
++        super.onPause();
++    }
+ }
+diff --git a/app/src/main/java/net/openconnect_vpn/android/TokenImportActivity.java b/app/src/main/java/net/openconnect_vpn/android/TokenImportActivity.java
+index 6ed7055..f8f3938 100644
+--- a/app/src/main/java/net/openconnect_vpn/android/TokenImportActivity.java
++++ b/app/src/main/java/net/openconnect_vpn/android/TokenImportActivity.java
+@@ -55,7 +55,7 @@ public class TokenImportActivity extends Activity {
+ 
+ 	public static final String TAG = "OpenConnect";
+ 
+-	public static final String EXTRA_UUID = "net.openconnect_vpn.android.UUID";
++	public static final String EXTRA_UUID = "net.openconnect_vpn.android.smart.UUID";
+ 
+ 	private static final int ALERT_NONE = 0;
+ 	private static final int ALERT_BAD_TOKEN = 1;
+diff --git a/app/src/main/java/net/openconnect_vpn/android/core/DeviceStateReceiver.java b/app/src/main/java/net/openconnect_vpn/android/core/DeviceStateReceiver.java
+index 5663f87..14732a8 100644
+--- a/app/src/main/java/net/openconnect_vpn/android/core/DeviceStateReceiver.java
++++ b/app/src/main/java/net/openconnect_vpn/android/core/DeviceStateReceiver.java
+@@ -37,7 +37,7 @@ public class DeviceStateReceiver extends BroadcastReceiver {
+ 
+ 	public static final String TAG = "OpenConnect";
+ 
+-	public static final String PREF_CHANGED = "net.openconnect_vpn.android.PREF_CHANGED";
++	public static final String PREF_CHANGED = "net.openconnect_vpn.android.smart.PREF_CHANGED";
+ 
+     private OpenVPNManagement mManagement;
+ 
+diff --git a/app/src/main/java/net/openconnect_vpn/android/core/KeepAlive.java b/app/src/main/java/net/openconnect_vpn/android/core/KeepAlive.java
+index 212568c..352522d 100644
+--- a/app/src/main/java/net/openconnect_vpn/android/core/KeepAlive.java
++++ b/app/src/main/java/net/openconnect_vpn/android/core/KeepAlive.java
+@@ -45,7 +45,7 @@ public class KeepAlive extends BroadcastReceiver {
+ 
+ 	public static final String TAG = "OpenConnect";
+ 
+-	public static final String ACTION_KEEPALIVE_ALARM = "net.openconnect_vpn.android.KEEPALIVE_ALARM";
++	public static final String ACTION_KEEPALIVE_ALARM = "net.openconnect_vpn.android.smart.KEEPALIVE_ALARM";
+ 
+ 	private boolean mConnectionActive;
+ 
+@@ -209,7 +209,7 @@ public class KeepAlive extends BroadcastReceiver {
+ 	}
+ 
+ 	private void scheduleNext(Context context, int delayMs) {
+-		Intent intent = new Intent("net.openconnect_vpn.android.KEEPALIVE_ALARM");
++		Intent intent = new Intent("net.openconnect_vpn.android.smart.KEEPALIVE_ALARM");
+ 		mPendingIntent = PendingIntent.getBroadcast(context, 0, intent,
+ 				PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+ 
+diff --git a/app/src/main/java/net/openconnect_vpn/android/core/OpenConnectManagementThread.java b/app/src/main/java/net/openconnect_vpn/android/core/OpenConnectManagementThread.java
+index 159f217..750a6ed 100644
+--- a/app/src/main/java/net/openconnect_vpn/android/core/OpenConnectManagementThread.java
++++ b/app/src/main/java/net/openconnect_vpn/android/core/OpenConnectManagementThread.java
+@@ -709,6 +709,52 @@ public class OpenConnectManagementThread implements Runnable, OpenVPNManagement
+ 			errorAlert(mContext.getString(R.string.error_invalid_hostname, mServerAddr));
+ 			return false;
+ 		}
++
++		/* Smart Relay is deliberately done after parseURL(): libopenconnect has
++		 * already stored the logical DNS hostname/SNI/HTTP Host, and setResolve()
++		 * changes only native getaddrinfo() for the selected physical relay. */
++		if (mPrefs.getBoolean("smart_relay", true)) {
++			String dnsName = mOC.getDNSName();
++			String cacheKey = SmartRelaySelector.isKeeneticCloudHost(dnsName)
++					? "smart_relay_pool_keenetic"
++					: "smart_relay_pool_" + Integer.toHexString(dnsName.hashCode());
++			String cachedPool = mAppPrefs.getString(cacheKey, "");
++			ArrayList<String> relatedServers = new ArrayList<String>();
++			for (VpnProfile p : ProfileManager.getProfiles()) {
++				relatedServers.add(p.mPrefs.getString("server_address", ""));
++			}
++
++			SmartRelaySelector.Selection relay = SmartRelaySelector.select(
++					mServerAddr, relatedServers, cachedPool,
++					new SmartRelaySelector.SocketProtector() {
++						@Override public boolean protect(java.net.Socket socket) {
++							return mOpenVPNService.protect(socket);
++						}
++					},
++					new SmartRelaySelector.Logger() {
++						@Override public void log(String line) {
++							OpenConnectManagementThread.this.log(line);
++						}
++					});
++			if (relay != null) {
++				if (relay.poolCsv != null && relay.poolCsv.length() > 0)
++					mAppPrefs.edit().putString(cacheKey, relay.poolCsv).apply();
++				if (relay.selectedIp != null) {
++					int resolveRet = mOC.setResolve(dnsName, relay.selectedIp);
++					if (resolveRet != 0) {
++						log("SMART RELAY: native resolve override failed: " + resolveRet);
++						mPrefs.edit().remove("smart_relay_last_selected_ip").apply();
++					} else {
++						mPrefs.edit().putString("smart_relay_last_selected_ip", relay.selectedIp).apply();
++					}
++				} else {
++					mPrefs.edit().remove("smart_relay_last_selected_ip").apply();
++				}
++			}
++		} else {
++			log("SMART RELAY: disabled for this profile");
++		}
++
+ 		int ret = mOC.obtainCookie();
+ 		if (ret < 0) {
+ 			// don't pop up an alert if the user rejected the server cert
+diff --git a/app/src/main/java/net/openconnect_vpn/android/core/OpenVpnService.java b/app/src/main/java/net/openconnect_vpn/android/core/OpenVpnService.java
+index 1a4671a..5c75093 100644
+--- a/app/src/main/java/net/openconnect_vpn/android/core/OpenVpnService.java
++++ b/app/src/main/java/net/openconnect_vpn/android/core/OpenVpnService.java
+@@ -58,13 +58,13 @@ public class OpenVpnService extends VpnService {
+ 
+ 	public static final String TAG = "OpenConnect";
+ 
+-	public static final String START_SERVICE = "net.openconnect_vpn.android.START_SERVICE";
+-	public static final String START_SERVICE_STICKY = "net.openconnect_vpn.android.START_SERVICE_STICKY";
+-	public static final String ALWAYS_SHOW_NOTIFICATION = "net.openconnect_vpn.android.NOTIFICATION_ALWAYS_VISIBLE";
++	public static final String START_SERVICE = "net.openconnect_vpn.android.smart.START_SERVICE";
++	public static final String START_SERVICE_STICKY = "net.openconnect_vpn.android.smart.START_SERVICE_STICKY";
++	public static final String ALWAYS_SHOW_NOTIFICATION = "net.openconnect_vpn.android.smart.NOTIFICATION_ALWAYS_VISIBLE";
+ 
+-	public static final String ACTION_VPN_STATUS = "net.openconnect_vpn.android.VPN_STATUS";
+-	public static final String EXTRA_CONNECTION_STATE = "net.openconnect_vpn.android.connectionState";
+-	public static final String EXTRA_UUID = "net.openconnect_vpn.android.UUID";
++	public static final String ACTION_VPN_STATUS = "net.openconnect_vpn.android.smart.VPN_STATUS";
++	public static final String EXTRA_CONNECTION_STATE = "net.openconnect_vpn.android.smart.connectionState";
++	public static final String EXTRA_UUID = "net.openconnect_vpn.android.smart.UUID";
+ 
+ 	// These are valid in the CONNECTED state
+ 	public VpnProfile profile;
+diff --git a/app/src/main/java/net/openconnect_vpn/android/core/SmartRelaySelector.java b/app/src/main/java/net/openconnect_vpn/android/core/SmartRelaySelector.java
+new file mode 100644
+index 0000000..9efd82b
+--- /dev/null
++++ b/app/src/main/java/net/openconnect_vpn/android/core/SmartRelaySelector.java
+@@ -0,0 +1,442 @@
++/*
++ * Smart relay discovery/selection for OpenConnect for Android.
++ *
++ * This file is part of a GPLv2 derivative of OpenConnect for Android.
++ */
++package net.openconnect_vpn.android.core;
++
++import java.io.BufferedReader;
++import java.io.InputStream;
++import java.io.InputStreamReader;
++import java.net.HttpURLConnection;
++import java.net.Inet4Address;
++import java.net.InetAddress;
++import java.net.InetSocketAddress;
++import java.net.Socket;
++import java.net.URI;
++import java.net.URLEncoder;
++import java.nio.charset.StandardCharsets;
++import java.security.SecureRandom;
++import java.security.cert.X509Certificate;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Comparator;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Set;
++import java.util.concurrent.Callable;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++
++import javax.net.ssl.HttpsURLConnection;
++import javax.net.ssl.SSLContext;
++import javax.net.ssl.SSLSocket;
++import javax.net.ssl.SSLSocketFactory;
++import javax.net.ssl.TrustManager;
++import javax.net.ssl.X509TrustManager;
++
++/**
++ * Finds all relay IPs we can discover for a logical VPN hostname, probes them
++ * in parallel, and returns the fastest usable IP.  No credentials or HTTP
++ * application data are sent during probing.
++ *
++ * The selected IP is later installed into libopenconnect as a getaddrinfo()
++ * override.  The original DNS hostname remains untouched for TLS SNI,
++ * certificate handling and HTTP Host.
++ */
++public final class SmartRelaySelector {
++    public interface Logger {
++        void log(String line);
++    }
++
++    /** Allows VpnService to exempt probe sockets from an already-active VPN. */
++    public interface SocketProtector {
++        boolean protect(Socket socket);
++    }
++
++    public static final class Endpoint {
++        public final String host;
++        public final int port;
++
++        Endpoint(String host, int port) {
++            this.host = host;
++            this.port = port;
++        }
++    }
++
++    public static final class Candidate {
++        public final String ip;
++        public final boolean tcpOk;
++        public final boolean tlsOk;
++        public final long tcpMs;
++        public final long tlsMs;
++        public final String error;
++
++        Candidate(String ip, boolean tcpOk, boolean tlsOk,
++                  long tcpMs, long tlsMs, String error) {
++            this.ip = ip;
++            this.tcpOk = tcpOk;
++            this.tlsOk = tlsOk;
++            this.tcpMs = tcpMs;
++            this.tlsMs = tlsMs;
++            this.error = error;
++        }
++
++        long score() {
++            // TLS-confirmed nodes always rank ahead of TCP-only fallbacks.
++            long base = tlsOk ? 0 : (tcpOk ? 1_000_000L : 10_000_000L);
++            long latency = Math.max(0, tcpMs) + Math.max(0, tlsMs);
++            return base + latency;
++        }
++    }
++
++    public static final class Selection {
++        public final Endpoint endpoint;
++        public final String selectedIp;
++        public final List<Candidate> candidates;
++        public final String poolCsv;
++
++        Selection(Endpoint endpoint, String selectedIp,
++                  List<Candidate> candidates, String poolCsv) {
++            this.endpoint = endpoint;
++            this.selectedIp = selectedIp;
++            this.candidates = candidates;
++            this.poolCsv = poolCsv;
++        }
++    }
++
++    private static final int DNS_TIMEOUT_MS = 1400;
++    private static final int TCP_TIMEOUT_MS = 1800;
++    private static final int TLS_TIMEOUT_MS = 2200;
++    private static final int MAX_CANDIDATES = 32;
++
++    private static final Pattern JSON_A = Pattern.compile(
++            "\\\"data\\\"\\s*:\\s*\\\"([0-9]{1,3}(?:\\.[0-9]{1,3}){3})\\\"");
++
++    private SmartRelaySelector() { }
++
++    public static Endpoint parseEndpoint(String serverAddress) throws Exception {
++        String s = serverAddress == null ? "" : serverAddress.trim();
++        if (s.length() == 0)
++            throw new IllegalArgumentException("empty server address");
++        if (!s.matches("^[a-zA-Z][a-zA-Z0-9+.-]*://.*"))
++            s = "https://" + s;
++        URI u = new URI(s);
++        String host = u.getHost();
++        if (host == null || host.length() == 0)
++            throw new IllegalArgumentException("no hostname in " + serverAddress);
++        int port = u.getPort() > 0 ? u.getPort() : 443;
++        return new Endpoint(host, port);
++    }
++
++    /** Cross-profile relay sharing is disabled in the public build. */
++    public static boolean isKeeneticCloudHost(String host) {
++        return false;
++    }
++
++    public static Selection select(String serverAddress,
++                                   Iterable<String> relatedServerAddresses,
++                                   String cachedCsv,
++                                   SocketProtector protector,
++                                   Logger logger) {
++        final Endpoint endpoint;
++        try {
++            endpoint = parseEndpoint(serverAddress);
++        } catch (Exception e) {
++            log(logger, "SMART RELAY: address parse failed: " + e.getMessage());
++            return null;
++        }
++
++        final LinkedHashSet<String> pool = new LinkedHashSet<String>();
++        addCsv(pool, cachedCsv);
++
++        // System resolver is cheap and often gives the carrier-specific pair.
++        addSystemDNS(pool, endpoint.host, logger);
++
++        final LinkedHashSet<String> discoveryHosts = new LinkedHashSet<String>();
++        discoveryHosts.add(endpoint.host);
++        if (isKeeneticCloudHost(endpoint.host) && relatedServerAddresses != null) {
++            for (String addr : relatedServerAddresses) {
++                try {
++                    Endpoint e = parseEndpoint(addr);
++                    if (isKeeneticCloudHost(e.host))
++                        discoveryHosts.add(e.host);
++                } catch (Exception ignored) { }
++            }
++        }
++
++        // Public DoH views are queried concurrently.  This is intentionally
++        // additive: system DNS remains a source and private/non-public names
++        // continue to work even if DoH is blocked.
++        ExecutorService discoveryExec = Executors.newFixedThreadPool(4);
++        List<Future<Set<String>>> discovery = new ArrayList<Future<Set<String>>>();
++        for (final String host : discoveryHosts) {
++            discovery.add(discoveryExec.submit(new Callable<Set<String>>() {
++                @Override public Set<String> call() {
++                    return queryGoogle(host);
++                }
++            }));
++            discovery.add(discoveryExec.submit(new Callable<Set<String>>() {
++                @Override public Set<String> call() {
++                    return queryCloudflare(host);
++                }
++            }));
++            // Also ask the system resolver for other configured Keenetic hosts.
++            if (!host.equals(endpoint.host))
++                addSystemDNS(pool, host, logger);
++        }
++        discoveryExec.shutdown();
++        for (Future<Set<String>> f : discovery) {
++            try {
++                Set<String> result = f.get(DNS_TIMEOUT_MS + 500L, TimeUnit.MILLISECONDS);
++                synchronized (pool) {
++                    for (String ip : result)
++                        if (isIPv4(ip) && pool.size() < MAX_CANDIDATES)
++                            pool.add(ip);
++                }
++            } catch (Exception ignored) { }
++        }
++        discoveryExec.shutdownNow();
++
++        if (pool.isEmpty()) {
++            log(logger, "SMART RELAY: no candidate IPs discovered; using normal DNS");
++            return new Selection(endpoint, null, Collections.<Candidate>emptyList(), "");
++        }
++
++        log(logger, "SMART RELAY: discovered " + pool.size() + " candidate(s): " + join(pool));
++
++        ExecutorService probeExec = Executors.newFixedThreadPool(Math.min(8, pool.size()));
++        List<Future<Candidate>> probes = new ArrayList<Future<Candidate>>();
++        for (final String ip : pool) {
++            probes.add(probeExec.submit(new Callable<Candidate>() {
++                @Override public Candidate call() {
++                    return probe(endpoint.host, endpoint.port, ip, protector);
++                }
++            }));
++        }
++        probeExec.shutdown();
++
++        List<Candidate> candidates = new ArrayList<Candidate>();
++        for (Future<Candidate> f : probes) {
++            try {
++                candidates.add(f.get(TCP_TIMEOUT_MS + TLS_TIMEOUT_MS + 1000L,
++                        TimeUnit.MILLISECONDS));
++            } catch (Exception ignored) { }
++        }
++        probeExec.shutdownNow();
++
++        Collections.sort(candidates, new Comparator<Candidate>() {
++            @Override public int compare(Candidate a, Candidate b) {
++                return Long.compare(a.score(), b.score());
++            }
++        });
++
++        for (Candidate c : candidates) {
++            if (c.tlsOk) {
++                log(logger, "SMART RELAY: " + c.ip + " OK tcp=" + c.tcpMs +
++                        "ms tls=" + c.tlsMs + "ms");
++            } else if (c.tcpOk) {
++                log(logger, "SMART RELAY: " + c.ip + " TCP-ONLY tcp=" + c.tcpMs +
++                        "ms (TLS probe: " + c.error + ")");
++            } else {
++                log(logger, "SMART RELAY: " + c.ip + " FAIL " + c.error);
++            }
++        }
++
++        String selected = null;
++        for (Candidate c : candidates) {
++            if (c.tlsOk) {
++                selected = c.ip;
++                break;
++            }
++        }
++        // Some legitimate VPN gateways use TLS setups that Java cannot probe
++        // but libopenconnect can.  If no TLS probe passed, a working TCP node
++        // is still a better hint than a known-dead address.
++        if (selected == null) {
++            for (Candidate c : candidates) {
++                if (c.tcpOk) {
++                    selected = c.ip;
++                    break;
++                }
++            }
++        }
++
++        if (selected != null)
++            log(logger, "SMART RELAY: selected " + selected + " for " +
++                    endpoint.host + ":" + endpoint.port);
++        else
++            log(logger, "SMART RELAY: no healthy candidate; falling back to normal DNS");
++
++        return new Selection(endpoint, selected,
++                Collections.unmodifiableList(candidates), join(pool));
++    }
++
++    private static void addSystemDNS(Set<String> pool, String host, Logger logger) {
++        try {
++            InetAddress[] arr = InetAddress.getAllByName(host);
++            synchronized (pool) {
++                for (InetAddress a : arr) {
++                    if (a instanceof Inet4Address && pool.size() < MAX_CANDIDATES)
++                        pool.add(a.getHostAddress());
++                }
++            }
++        } catch (Exception e) {
++            log(logger, "SMART RELAY: system DNS failed for " + host + ": " +
++                    e.getClass().getSimpleName());
++        }
++    }
++
++    private static Set<String> queryGoogle(String host) {
++        try {
++            String q = URLEncoder.encode(host, "UTF-8");
++            return queryJson("https://dns.google/resolve?name=" + q + "&type=A");
++        } catch (Exception e) {
++            return Collections.emptySet();
++        }
++    }
++
++    private static Set<String> queryCloudflare(String host) {
++        try {
++            String q = URLEncoder.encode(host, "UTF-8");
++            return queryJson("https://cloudflare-dns.com/dns-query?name=" + q + "&type=A");
++        } catch (Exception e) {
++            return Collections.emptySet();
++        }
++    }
++
++    private static Set<String> queryJson(String url) {
++        LinkedHashSet<String> out = new LinkedHashSet<String>();
++        HttpURLConnection c = null;
++        try {
++            c = (HttpURLConnection)new java.net.URL(url).openConnection();
++            c.setConnectTimeout(DNS_TIMEOUT_MS);
++            c.setReadTimeout(DNS_TIMEOUT_MS);
++            c.setRequestProperty("Accept", "application/dns-json, application/json");
++            c.setRequestProperty("Cache-Control", "no-cache");
++            c.setRequestProperty("User-Agent", "SmartOpenConnect/0.1");
++            int code = c.getResponseCode();
++            if (code < 200 || code >= 300)
++                return out;
++            InputStream in = c.getInputStream();
++            BufferedReader br = new BufferedReader(new InputStreamReader(in,
++                    StandardCharsets.UTF_8));
++            StringBuilder sb = new StringBuilder();
++            String line;
++            while ((line = br.readLine()) != null && sb.length() < 256 * 1024)
++                sb.append(line);
++            br.close();
++            Matcher m = JSON_A.matcher(sb.toString());
++            while (m.find()) {
++                String ip = m.group(1);
++                if (isIPv4(ip))
++                    out.add(ip);
++            }
++        } catch (Exception ignored) {
++        } finally {
++            if (c != null)
++                c.disconnect();
++        }
++        return out;
++    }
++
++    private static Candidate probe(String host, int port, String ip, SocketProtector protector) {
++        Socket raw = null;
++        SSLSocket ssl = null;
++        long tcpMs = -1;
++        long tlsMs = -1;
++        boolean tcpOk = false;
++        boolean tlsOk = false;
++        String error = "";
++        try {
++            long t = System.nanoTime();
++            raw = new Socket();
++            if (protector != null && !protector.protect(raw))
++                throw new java.io.IOException("VpnService.protect() failed");
++            raw.connect(new InetSocketAddress(ip, port), TCP_TIMEOUT_MS);
++            tcpMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t);
++            tcpOk = true;
++            raw.setSoTimeout(TLS_TIMEOUT_MS);
++
++            TrustManager[] trustAll = new TrustManager[] { new X509TrustManager() {
++                @Override public X509Certificate[] getAcceptedIssuers() {
++                    return new X509Certificate[0];
++                }
++                @Override public void checkClientTrusted(X509Certificate[] chain, String authType) { }
++                @Override public void checkServerTrusted(X509Certificate[] chain, String authType) { }
++            }};
++            SSLContext ctx = SSLContext.getInstance("TLS");
++            ctx.init(null, trustAll, new SecureRandom());
++            SSLSocketFactory sf = ctx.getSocketFactory();
++
++            // Wrapping the already-connected IP socket with the logical host
++            // preserves SNI while keeping the physical destination fixed.
++            t = System.nanoTime();
++            ssl = (SSLSocket)sf.createSocket(raw, host, port, true);
++            raw = null;
++            ssl.setSoTimeout(TLS_TIMEOUT_MS);
++            ssl.startHandshake();
++            tlsMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t);
++            tlsOk = true;
++        } catch (Exception e) {
++            error = e.getClass().getSimpleName();
++            if (e.getMessage() != null && e.getMessage().length() > 0)
++                error += ": " + e.getMessage();
++        } finally {
++            try { if (ssl != null) ssl.close(); } catch (Exception ignored) { }
++            try { if (raw != null) raw.close(); } catch (Exception ignored) { }
++        }
++        return new Candidate(ip, tcpOk, tlsOk, tcpMs, tlsMs, error);
++    }
++
++    private static void addCsv(Set<String> pool, String csv) {
++        if (csv == null)
++            return;
++        for (String s : csv.split("[,\\s]+")) {
++            s = s.trim();
++            if (isIPv4(s) && pool.size() < MAX_CANDIDATES)
++                pool.add(s);
++        }
++    }
++
++    private static boolean isIPv4(String ip) {
++        if (ip == null || !ip.matches("^[0-9]{1,3}(?:\\.[0-9]{1,3}){3}$"))
++            return false;
++        String[] parts = ip.split("\\.");
++        for (String p : parts) {
++            try {
++                int v = Integer.parseInt(p);
++                if (v < 0 || v > 255)
++                    return false;
++            } catch (Exception e) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    private static String join(Iterable<String> values) {
++        StringBuilder sb = new StringBuilder();
++        for (String s : values) {
++            if (sb.length() != 0)
++                sb.append(',');
++            sb.append(s);
++        }
++        return sb.toString();
++    }
++
++    private static void log(Logger logger, String line) {
++        if (logger != null)
++            logger.log(line);
++    }
++}
+diff --git a/app/src/main/java/net/openconnect_vpn/android/fragments/CommonMenu.java b/app/src/main/java/net/openconnect_vpn/android/fragments/CommonMenu.java
+index ff3ce75..45e81d2 100644
+--- a/app/src/main/java/net/openconnect_vpn/android/fragments/CommonMenu.java
++++ b/app/src/main/java/net/openconnect_vpn/android/fragments/CommonMenu.java
+@@ -35,6 +35,7 @@ public class CommonMenu {
+ 
+ 	private static final int MENU_SETTINGS = 15;
+ 	private static final int MENU_SECURID = 20;
++	private static final int MENU_FAQ = 25;
+ 	private static final int MENU_ABOUT = 30;
+ 
+ 	private Context mContext;
+@@ -45,6 +46,8 @@ public class CommonMenu {
+ 			.setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER);
+ 		menu.add(Menu.NONE, MENU_SECURID, Menu.NONE, R.string.securid_info)
+ 			.setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER);
++		menu.add(Menu.NONE, MENU_FAQ, Menu.NONE, R.string.faq)
++			.setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER);
+ 		menu.add(Menu.NONE, MENU_ABOUT, Menu.NONE, R.string.about_openconnect)
+ 			.setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER);
+ 	}
+@@ -62,6 +65,8 @@ public class CommonMenu {
+ 			return startFragActivity("AboutFragment");
+ 		} else if (itemId == MENU_SECURID) {
+ 			return startFragActivity("TokenParentFragment");
++		} else if (itemId == MENU_FAQ) {
++			return startFragActivity("FaqFragment");
+ 		} else if (itemId == MENU_SETTINGS) {
+ 			return startFragActivity("GeneralSettings");
+ 		} else {
+diff --git a/app/src/main/java/net/openconnect_vpn/android/fragments/ConnectFragment.java b/app/src/main/java/net/openconnect_vpn/android/fragments/ConnectFragment.java
+new file mode 100644
+index 0000000..d49316e
+--- /dev/null
++++ b/app/src/main/java/net/openconnect_vpn/android/fragments/ConnectFragment.java
+@@ -0,0 +1,229 @@
++/*
++ * Thumb-friendly Connect screen for Smart OpenConnect.
++ * GPLv2+; part of the OpenConnect Android derivative.
++ */
++package net.openconnect_vpn.android.fragments;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
++import android.app.Fragment;
++import android.content.Intent;
++import android.content.SharedPreferences;
++import android.os.Bundle;
++import android.preference.PreferenceManager;
++import android.view.LayoutInflater;
++import android.view.View;
++import android.view.ViewGroup;
++import android.widget.ImageButton;
++import android.widget.TextView;
++
++import net.openconnect_vpn.android.MainActivity;
++import net.openconnect_vpn.android.R;
++import net.openconnect_vpn.android.VpnProfile;
++import net.openconnect_vpn.android.api.GrantPermissionsActivity;
++import net.openconnect_vpn.android.core.OpenConnectManagementThread;
++import net.openconnect_vpn.android.core.OpenVpnService;
++import net.openconnect_vpn.android.core.ProfileManager;
++import net.openconnect_vpn.android.core.VPNConnector;
++
++public class ConnectFragment extends Fragment {
++    public static final String PREF_SELECTED_PROFILE = "selected_profile_uuid";
++
++    private View mView;
++    private ImageButton mConnectButton;
++    private View mServerButton;
++    private TextView mState;
++    private TextView mUptime;
++    private TextView mTunnelIp;
++    private TextView mRelayIp;
++    private TextView mDownloadSpeed;
++    private TextView mDownloadTotal;
++    private TextView mUploadSpeed;
++    private TextView mUploadTotal;
++    private TextView mServerName;
++    private TextView mServerAddress;
++    private TextView mRelay;
++    private VPNConnector mConn;
++    private SharedPreferences mAppPrefs;
++    private int mConnectionState = OpenConnectManagementThread.STATE_DISCONNECTED;
++
++    @Override
++    public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle state) {
++        mView = inflater.inflate(R.layout.connect, container, false);
++        mAppPrefs = PreferenceManager.getDefaultSharedPreferences(getActivity());
++        mConnectButton = (ImageButton)mView.findViewById(R.id.connect_button);
++        mServerButton = mView.findViewById(R.id.selected_server_button);
++        mState = (TextView)mView.findViewById(R.id.connect_state);
++        mUptime = (TextView)mView.findViewById(R.id.connection_time);
++        mTunnelIp = (TextView)mView.findViewById(R.id.tunnel_ip_value);
++        mRelayIp = (TextView)mView.findViewById(R.id.relay_ip_value);
++        mDownloadSpeed = (TextView)mView.findViewById(R.id.download_speed);
++        mDownloadTotal = (TextView)mView.findViewById(R.id.download_total);
++        mUploadSpeed = (TextView)mView.findViewById(R.id.upload_speed);
++        mUploadTotal = (TextView)mView.findViewById(R.id.upload_total);
++        mServerName = (TextView)mView.findViewById(R.id.selected_server_name);
++        mServerAddress = (TextView)mView.findViewById(R.id.selected_server_address);
++        mRelay = (TextView)mView.findViewById(R.id.smart_relay_state);
++
++        mServerButton.setOnClickListener(new View.OnClickListener() {
++            @Override public void onClick(View v) {
++                ((MainActivity)getActivity()).showServersTab();
++            }
++        });
++
++        mConnectButton.setOnClickListener(new View.OnClickListener() {
++            @Override public void onClick(View v) {
++                if (mConnectionState != OpenConnectManagementThread.STATE_DISCONNECTED) {
++                    if (mConn != null && mConn.service != null)
++                        mConn.service.stopVPN();
++                    return;
++                }
++
++                VpnProfile profile = getSelectedProfile();
++                if (profile == null) {
++                    ((MainActivity)getActivity()).showServersTab();
++                    return;
++                }
++                selectProfile(profile);
++                Intent intent = new Intent(getActivity(), GrantPermissionsActivity.class);
++                intent.putExtra(getActivity().getPackageName() + GrantPermissionsActivity.EXTRA_UUID,
++                        profile.getUUIDString());
++                intent.setAction(Intent.ACTION_MAIN);
++                startActivity(intent);
++            }
++        });
++
++        mConn = new VPNConnector(getActivity(), false) {
++            @Override public void onUpdate(OpenVpnService service) {
++                mConnectionState = service.getConnectionState();
++                if (service.profile != null)
++                    selectProfile(service.profile);
++                updateUI(service);
++            }
++        };
++
++        updateUI(null);
++        return mView;
++    }
++
++    @Override
++    public void onResume() {
++        super.onResume();
++        updateUI(mConn == null ? null : mConn.service);
++    }
++
++    @Override
++    public void onDestroyView() {
++        if (mConn != null) {
++            mConn.unbind();
++            mConn = null;
++        }
++        super.onDestroyView();
++    }
++
++    private void selectProfile(VpnProfile profile) {
++        if (profile != null)
++            mAppPrefs.edit().putString(PREF_SELECTED_PROFILE, profile.getUUIDString()).apply();
++    }
++
++    private VpnProfile getSelectedProfile() {
++        String uuid = mAppPrefs.getString(PREF_SELECTED_PROFILE, null);
++        VpnProfile p = ProfileManager.get(uuid);
++        if (p != null)
++            return p;
++
++        VpnProfile last = ProfileManager.getLastConnectedVpn();
++        if (last != null) {
++            selectProfile(last);
++            return last;
++        }
++
++        List<VpnProfile> profiles = new ArrayList<VpnProfile>(ProfileManager.getProfiles());
++        Collections.sort(profiles);
++        if (profiles.isEmpty())
++            return null;
++        p = profiles.get(0);
++        selectProfile(p);
++        return p;
++    }
++
++    private void updateUI(OpenVpnService service) {
++        if (mView == null) return;
++        VpnProfile p = service != null && service.profile != null ? service.profile : getSelectedProfile();
++
++        if (p == null) {
++            mServerName.setText(R.string.no_profile_selected);
++            mServerAddress.setText(R.string.tap_to_choose_server);
++            mRelay.setText(R.string.smart_relay_no_profile);
++        } else {
++            String address = p.mPrefs.getString("server_address", "");
++            mServerName.setText(p.getName());
++            mServerAddress.setText(address);
++            boolean smart = p.mPrefs.getBoolean("smart_relay", true);
++            String ip = p.mPrefs.getString("smart_relay_last_selected_ip", "");
++            if (!smart)
++                mRelay.setText(R.string.smart_relay_off);
++            else if (ip.length() > 0)
++                mRelay.setText(getString(R.string.smart_relay_using, ip));
++            else
++                mRelay.setText(R.string.smart_relay_ready);
++        }
++
++        if (service != null) {
++            mConnectionState = service.getConnectionState();
++            mState.setText(service.getConnectionStateName());
++        } else {
++            mConnectionState = OpenConnectManagementThread.STATE_DISCONNECTED;
++            mState.setText(R.string.state_disconnected_short);
++        }
++
++        if (mConnectionState == OpenConnectManagementThread.STATE_CONNECTED) {
++            mConnectButton.setBackgroundResource(R.drawable.power_button_connected);
++            mConnectButton.setContentDescription(getString(R.string.disconnect));
++            mState.setTextColor(getResources().getColor(R.color.smart_green));
++            if (service != null && service.startTime != null)
++                mUptime.setText(OpenVpnService.formatElapsedTime(service.startTime.getTime()));
++            mTunnelIp.setText(service != null && service.ipInfo != null && service.ipInfo.addr != null
++                    ? service.ipInfo.addr : getString(R.string.value_unavailable));
++            updateTraffic();
++        } else if (mConnectionState == OpenConnectManagementThread.STATE_DISCONNECTED) {
++            mConnectButton.setBackgroundResource(R.drawable.power_button_disconnected);
++            mConnectButton.setContentDescription(getString(R.string.connect));
++            mState.setTextColor(getResources().getColor(R.color.text_primary));
++            mUptime.setText(R.string.tap_to_connect);
++            mTunnelIp.setText(R.string.value_unavailable);
++            clearTraffic();
++        } else {
++            mConnectButton.setBackgroundResource(R.drawable.power_button_connecting);
++            mConnectButton.setContentDescription(getString(R.string.cancel_connection));
++            mState.setTextColor(getResources().getColor(R.color.smart_amber));
++            mUptime.setText(R.string.working);
++            clearTraffic();
++        }
++
++        String relayIp = p == null ? "" : p.mPrefs.getString("smart_relay_last_selected_ip", "");
++        mRelayIp.setText(relayIp.length() == 0 ? getString(R.string.value_unavailable) : relayIp);
++    }
++
++    private void updateTraffic() {
++        if (mConn == null || !mConn.statsValid) {
++            clearTraffic();
++            return;
++        }
++        mDownloadSpeed.setText(OpenVpnService.humanReadableByteCount(mConn.deltaStats.rxBytes, true) + "/s");
++        mDownloadTotal.setText(getString(R.string.total_format,
++                OpenVpnService.humanReadableByteCount(mConn.newStats.rxBytes, false)));
++        mUploadSpeed.setText(OpenVpnService.humanReadableByteCount(mConn.deltaStats.txBytes, true) + "/s");
++        mUploadTotal.setText(getString(R.string.total_format,
++                OpenVpnService.humanReadableByteCount(mConn.newStats.txBytes, false)));
++    }
++
++    private void clearTraffic() {
++        mDownloadSpeed.setText(R.string.zero_speed);
++        mUploadSpeed.setText(R.string.zero_speed);
++        mDownloadTotal.setText(R.string.zero_total);
++        mUploadTotal.setText(R.string.zero_total);
++    }
++}
+diff --git a/app/src/main/java/net/openconnect_vpn/android/fragments/SendDumpFragment.java b/app/src/main/java/net/openconnect_vpn/android/fragments/SendDumpFragment.java
+index eaa867a..b3157b7 100644
+--- a/app/src/main/java/net/openconnect_vpn/android/fragments/SendDumpFragment.java
++++ b/app/src/main/java/net/openconnect_vpn/android/fragments/SendDumpFragment.java
+@@ -89,8 +89,8 @@ public class SendDumpFragment extends Fragment  {
+ 			OpenVPN.logError("No Minidump found!");
+ 		}
+ 
+-		uris.add(Uri.parse("content://net.openconnect_vpn.android.FileProvider/" + ldump.getName()));
+-		uris.add(Uri.parse("content://net.openconnect_vpn.android.FileProvider/" + ldump.getName() + ".log"));
++		uris.add(Uri.parse("content://" + getActivity().getPackageName() + ".FileProvider/" + ldump.getName()));
++		uris.add(Uri.parse("content://" + getActivity().getPackageName() + ".FileProvider/" + ldump.getName() + ".log"));
+ 
+ 		emailIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+ 		emailIntent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+diff --git a/app/src/main/java/net/openconnect_vpn/android/fragments/TokenDiagFragment.java b/app/src/main/java/net/openconnect_vpn/android/fragments/TokenDiagFragment.java
+index 96667b3..2c43596 100644
+--- a/app/src/main/java/net/openconnect_vpn/android/fragments/TokenDiagFragment.java
++++ b/app/src/main/java/net/openconnect_vpn/android/fragments/TokenDiagFragment.java
+@@ -62,7 +62,7 @@ public class TokenDiagFragment extends Fragment {
+ 
+ 	public static final String TAG = "OpenConnect";
+ 
+-	public static final String EXTRA_UUID = "net.openconnect_vpn.android.UUID";
++	public static final String EXTRA_UUID = "net.openconnect_vpn.android.smart.UUID";
+ 	public static final String EXTRA_PIN = "net.openconnect_vpn.android.PIN";
+ 	public static final String EXTRA_PIN_PROMPTED = "net.openconnect_vpn.android.PIN_PROMPTED";
+ 
+diff --git a/app/src/main/java/net/openconnect_vpn/android/fragments/VPNProfileList.java b/app/src/main/java/net/openconnect_vpn/android/fragments/VPNProfileList.java
+index 29ce263..797b6e4 100644
+--- a/app/src/main/java/net/openconnect_vpn/android/fragments/VPNProfileList.java
++++ b/app/src/main/java/net/openconnect_vpn/android/fragments/VPNProfileList.java
+@@ -37,6 +37,7 @@ import android.content.Context;
+ import android.content.DialogInterface;
+ import android.content.Intent;
+ import android.content.pm.PackageManager;
++import android.preference.PreferenceManager;
+ import android.graphics.drawable.Drawable;
+ import android.os.Bundle;
+ import android.text.Editable;
+@@ -57,14 +58,11 @@ import android.widget.Button;
+ import android.widget.EditText;
+ import android.widget.TextView;
+ import net.openconnect_vpn.android.ConnectionEditorActivity;
++import net.openconnect_vpn.android.MainActivity;
+ import net.openconnect_vpn.android.R;
+ import net.openconnect_vpn.android.VpnProfile;
+-import net.openconnect_vpn.android.api.GrantPermissionsActivity;
+ import net.openconnect_vpn.android.core.FragCache;
+-import net.openconnect_vpn.android.core.OpenConnectManagementThread;
+-import net.openconnect_vpn.android.core.OpenVpnService;
+ import net.openconnect_vpn.android.core.ProfileManager;
+-import net.openconnect_vpn.android.core.VPNConnector;
+ 
+ public class VPNProfileList extends ListFragment {
+ 
+@@ -76,9 +74,6 @@ public class VPNProfileList extends ListFragment {
+ 
+ 	private AlertDialog mDialog;
+ 	private EditText mDialogEntry;
+-	private Button mReconnectButton;
+-
+-	private VPNConnector mConn;
+ 
+ 	private class VPNArrayAdapter extends ArrayAdapter<VpnProfile> {
+ 
+@@ -95,7 +90,9 @@ public class VPNProfileList extends ListFragment {
+ 				@Override
+ 				public void onClick(View v) {
+ 					VpnProfile profile =(VpnProfile) getListAdapter().getItem(position);
+-					startVPN(profile);
++					PreferenceManager.getDefaultSharedPreferences(getActivity()).edit()
++						.putString(ConnectFragment.PREF_SELECTED_PROFILE, profile.getUUIDString()).apply();
++					((MainActivity)getActivity()).showConnectTab();
+ 				}
+ 			});
+ 
+@@ -157,53 +154,22 @@ public class VPNProfileList extends ListFragment {
+ 
+ 		TextView newvpntext = (TextView) v.findViewById(R.id.add_new_vpn_hint);
+ 		newvpntext.setText(Html.fromHtml(getString(R.string.add_new_vpn_hint),new MiniImageGetter(),null));
++		v.findViewById(R.id.add_server_button).setOnClickListener(new OnClickListener() {
++			@Override public void onClick(View view) {
++				onAddProfileClicked("");
++			}
++		});
+ 
+ 		mArrayadapter = new VPNArrayAdapter(getActivity(), R.layout.vpn_list_item, R.id.vpn_item_title);
+ 		setListAdapter(mArrayadapter);
+ 
+-		mReconnectButton = (Button)v.findViewById(R.id.reconnect_button);
+-    	mReconnectButton.setOnClickListener(new OnClickListener() {
+-			@Override
+-			public void onClick(View arg0) {
+-				if (mConn.service.getConnectionState() ==
+-						OpenConnectManagementThread.STATE_DISCONNECTED) {
+-					mConn.service.startReconnectActivity(getActivity());
+-				}
+-			}
+-    	});
+-
+-		if (mIsTv) {
+-			((Button)v.findViewById(R.id.add_new_button)).setOnClickListener(new OnClickListener() {
+-				@Override
+-				public void onClick(View v) {
+-					onAddProfileClicked("");
+-				}
+-			});
+-		}
+-
+-    	mConn = new VPNConnector(getActivity(), false) {
+-			@Override
+-			public void onUpdate(OpenVpnService service) {
+-				String profileName = service.getReconnectName();
+-				if (profileName != null) {
+-					mReconnectButton.setText(getString(R.string.reconnect_to, profileName));
+-					if (mIsTv)
+-						mReconnectButton.setVisibility(View.VISIBLE);
+-					else
+-						v.findViewById(R.id.reconnect_box).setVisibility(View.VISIBLE);
+-				}
+-			}
+-    	};
++		// The MVP has one primary Connect/Disconnect control only: the large
++		// thumb-zone button on ConnectFragment. Avoid a second reconnect button here.
++		v.findViewById(R.id.reconnect_box).setVisibility(View.GONE);
+ 
+ 		return v;
+ 	}
+ 
+-    @Override
+-    public void onDestroyView() {
+-    	mConn.unbind();
+-    	super.onDestroyView();
+-    }
+-
+ 	class VpnProfileNameComperator implements Comparator<VpnProfile> {
+ 
+ 		@Override
+@@ -345,13 +311,4 @@ public class VPNProfileList extends ListFragment {
+ 
+ 		startActivity(vprefintent);
+ 	}
+-
+-	private void startVPN(VpnProfile profile) {
+-		Intent intent = new Intent(getActivity(), GrantPermissionsActivity.class);
+-		String pkg = getActivity().getPackageName();
+-
+-		intent.putExtra(pkg + GrantPermissionsActivity.EXTRA_UUID, profile.getUUID().toString());
+-		intent.setAction(Intent.ACTION_MAIN);
+-		startActivity(intent);
+-	}
+ }
+diff --git a/app/src/main/res/drawable/add_server_button.xml b/app/src/main/res/drawable/add_server_button.xml
+new file mode 100644
+index 0000000..09d7d75
+--- /dev/null
++++ b/app/src/main/res/drawable/add_server_button.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<selector xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:state_pressed="true"><shape android:shape="rectangle"><solid android:color="#8D72F0"/><corners android:radius="14dp"/></shape></item>
++    <item><shape android:shape="rectangle"><solid android:color="@color/smart_purple"/><corners android:radius="14dp"/></shape></item>
++</selector>
+diff --git a/app/src/main/res/drawable/ic_chevron_right.xml b/app/src/main/res/drawable/ic_chevron_right.xml
+new file mode 100644
+index 0000000..b59aca7
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_chevron_right.xml
+@@ -0,0 +1,3 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#9EA4BE" android:pathData="M9,6l6,6 -6,6 -1.4,-1.4 4.6,-4.6 -4.6,-4.6z"/>
++</vector>
+diff --git a/app/src/main/res/drawable/ic_edit.xml b/app/src/main/res/drawable/ic_edit.xml
+new file mode 100644
+index 0000000..29ed431
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_edit.xml
+@@ -0,0 +1,3 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#B9A7FF" android:pathData="M3,17.25V21h3.75L17.81,9.94l-3.75,-3.75zM20.71,7.04a1,1 0,0 0,0 -1.41l-2.34,-2.34a1,1 0,0 0,-1.41 0l-1.83,1.83 3.75,3.75z"/>
++</vector>
+diff --git a/app/src/main/res/drawable/ic_log.xml b/app/src/main/res/drawable/ic_log.xml
+new file mode 100644
+index 0000000..a26c9a7
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_log.xml
+@@ -0,0 +1,3 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#9EA4BE" android:pathData="M4,5h16v2H4zM4,11h16v2H4zM4,17h11v2H4z"/>
++</vector>
+diff --git a/app/src/main/res/drawable/ic_power.xml b/app/src/main/res/drawable/ic_power.xml
+new file mode 100644
+index 0000000..5bec9b2
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_power.xml
+@@ -0,0 +1,4 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="56dp" android:height="56dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#FFFFFFFF" android:pathData="M11,2h2v10h-2z"/>
++    <path android:fillColor="#FFFFFFFF" android:pathData="M7.05,4.55L8.46,5.96A7,7 0,1 0,15.54 5.96L16.95,4.55A9,9 0,1 1,7.05 4.55z"/>
++</vector>
+diff --git a/app/src/main/res/drawable/ic_power_small.xml b/app/src/main/res/drawable/ic_power_small.xml
+new file mode 100644
+index 0000000..1a59ebc
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_power_small.xml
+@@ -0,0 +1,3 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#B9A7FF" android:pathData="M11,2h2v10h-2zM7.05,4.55L8.46,5.96A7,7 0,1 0,15.54 5.96L16.95,4.55A9,9 0,1 1,7.05 4.55z"/>
++</vector>
+diff --git a/app/src/main/res/drawable/ic_servers.xml b/app/src/main/res/drawable/ic_servers.xml
+new file mode 100644
+index 0000000..0f3a195
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_servers.xml
+@@ -0,0 +1,3 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#B9A7FF" android:pathData="M4,3h16a2,2 0,0 1,2 2v4a2,2 0,0 1,-2 2H4a2,2 0,0 1,-2 -2V5a2,2 0,0 1,2 -2zM5,6v2h2V6H5zM4,13h16a2,2 0,0 1,2 2v4a2,2 0,0 1,-2 2H4a2,2 0,0 1,-2 -2v-4a2,2 0,0 1,2 -2zM5,16v2h2v-2H5z"/>
++</vector>
+diff --git a/app/src/main/res/drawable/ic_settings.xml b/app/src/main/res/drawable/ic_settings.xml
+new file mode 100644
+index 0000000..01a8a46
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_settings.xml
+@@ -0,0 +1,3 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#C8CBE0" android:pathData="M19.43,12.98c0.04,-0.32 0.07,-0.65 0.07,-0.98s-0.03,-0.66 -0.08,-0.98l2.11,-1.65c0.19,-0.15 0.24,-0.42 0.12,-0.64l-2,-3.46c-0.12,-0.22 -0.37,-0.31 -0.6,-0.22l-2.49,1c-0.52,-0.4 -1.08,-0.73 -1.69,-0.98L14.5,2.42A0.49,0.49 0,0 0,14,2h-4c-0.25,0 -0.46,0.18 -0.5,0.42L9.12,5.07c-0.61,0.25 -1.17,0.59 -1.69,0.98l-2.49,-1c-0.23,-0.08 -0.48,0 -0.6,0.22l-2,3.46c-0.13,0.22 -0.07,0.49 0.12,0.64l2.11,1.65c-0.04,0.32 -0.08,0.67 -0.08,0.98s0.03,0.66 0.08,0.98l-2.11,1.65c-0.19,0.15 -0.24,0.42 -0.12,0.64l2,3.46c0.12,0.22 0.37,0.31 0.6,0.22l2.49,-1c0.52,0.4 1.08,0.73 1.69,0.98l0.38,2.65c0.04,0.24 0.25,0.42 0.5,0.42h4c0.25,0 0.46,-0.18 0.5,-0.42l0.38,-2.65c0.61,-0.25 1.17,-0.59 1.69,-0.98l2.49,1c0.23,0.08 0.48,0 0.6,-0.22l2,-3.46c0.12,-0.22 0.07,-0.49 -0.12,-0.64zM12,15.5A3.5,3.5 0,1 1,12 8a3.5,3.5 0,0 1,0 7.5z"/>
++</vector>
+diff --git a/app/src/main/res/drawable/ic_smartconnect_launcher.xml b/app/src/main/res/drawable/ic_smartconnect_launcher.xml
+new file mode 100644
+index 0000000..de336c9
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_smartconnect_launcher.xml
+@@ -0,0 +1,7 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
++    <path android:fillColor="#111A3E" android:pathData="M14,4h80a10,10 0,0 1,10 10v80a10,10 0,0 1,-10 10H14A10,10 0,0 1,4 94V14A10,10 0,0 1,14 4z"/>
++    <path android:fillColor="#7657E8" android:pathData="M25,29a8,8 0,1 1,0 16a8,8 0,0 1,0 -16zM83,63a8,8 0,1 1,0 16a8,8 0,0 1,0 -16z"/>
++    <path android:fillColor="#29D4A3" android:pathData="M75,21a8,8 0,1 1,0 16a8,8 0,0 1,0 -16zM33,71a8,8 0,1 1,0 16a8,8 0,0 1,0 -16z"/>
++    <path android:fillColor="#FFFFFFFF" android:pathData="M31,37c22,-18 37,-15 44,-8l-4,4c-7,-5 -19,-5 -36,8zM77,71c-22,18 -37,15 -44,8l4,-4c7,5 19,5 36,-8zM42,51h24v6H42z"/>
++    <path android:fillColor="#B9A7FF" android:pathData="M59,43l13,11 -13,11z"/>
++</vector>
+diff --git a/app/src/main/res/drawable/icon_button_background.xml b/app/src/main/res/drawable/icon_button_background.xml
+new file mode 100644
+index 0000000..e2ef939
+--- /dev/null
++++ b/app/src/main/res/drawable/icon_button_background.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<selector xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:state_pressed="true"><shape android:shape="oval"><solid android:color="#2B3158"/></shape></item>
++    <item><shape android:shape="oval"><solid android:color="@android:color/transparent"/></shape></item>
++</selector>
+diff --git a/app/src/main/res/drawable/nav_item_normal.xml b/app/src/main/res/drawable/nav_item_normal.xml
+new file mode 100644
+index 0000000..e04ce7d
+--- /dev/null
++++ b/app/src/main/res/drawable/nav_item_normal.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<selector xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:state_pressed="true"><shape android:shape="rectangle"><solid android:color="#242948"/><corners android:radius="18dp"/></shape></item>
++    <item><shape android:shape="rectangle"><solid android:color="@android:color/transparent"/><corners android:radius="18dp"/></shape></item>
++</selector>
+diff --git a/app/src/main/res/drawable/nav_item_selected.xml b/app/src/main/res/drawable/nav_item_selected.xml
+new file mode 100644
+index 0000000..68a76c6
+--- /dev/null
++++ b/app/src/main/res/drawable/nav_item_selected.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
++    <solid android:color="#33285F" />
++    <corners android:radius="18dp" />
++</shape>
+diff --git a/app/src/main/res/drawable/power_button_connected.xml b/app/src/main/res/drawable/power_button_connected.xml
+new file mode 100644
+index 0000000..9ffab86
+--- /dev/null
++++ b/app/src/main/res/drawable/power_button_connected.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<selector xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:state_pressed="true"><shape android:shape="oval"><solid android:color="#4BE4B8"/></shape></item>
++    <item><shape android:shape="oval"><gradient android:angle="315" android:startColor="#16B98B" android:endColor="#37DBAD" android:type="linear"/><stroke android:width="2dp" android:color="#79F1CF"/></shape></item>
++</selector>
+diff --git a/app/src/main/res/drawable/power_button_connecting.xml b/app/src/main/res/drawable/power_button_connecting.xml
+new file mode 100644
+index 0000000..4d73ef1
+--- /dev/null
++++ b/app/src/main/res/drawable/power_button_connecting.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<selector xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:state_pressed="true"><shape android:shape="oval"><solid android:color="#FFD77A"/></shape></item>
++    <item><shape android:shape="oval"><gradient android:angle="315" android:startColor="#D79A20" android:endColor="#FFC857" android:type="linear"/><stroke android:width="2dp" android:color="#FFE19A"/></shape></item>
++</selector>
+diff --git a/app/src/main/res/drawable/power_button_disconnected.xml b/app/src/main/res/drawable/power_button_disconnected.xml
+new file mode 100644
+index 0000000..90af131
+--- /dev/null
++++ b/app/src/main/res/drawable/power_button_disconnected.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<selector xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:state_pressed="true"><shape android:shape="oval"><solid android:color="#8A72EB"/></shape></item>
++    <item><shape android:shape="oval"><gradient android:angle="315" android:startColor="#6447CE" android:endColor="#8B6EEF" android:type="linear"/><stroke android:width="2dp" android:color="#A995FF"/></shape></item>
++</selector>
+diff --git a/app/src/main/res/drawable/power_inner_ring.xml b/app/src/main/res/drawable/power_inner_ring.xml
+new file mode 100644
+index 0000000..9d396c9
+--- /dev/null
++++ b/app/src/main/res/drawable/power_inner_ring.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
++    <solid android:color="@android:color/transparent" />
++    <stroke android:width="2dp" android:color="@color/ring_inner" />
++</shape>
+diff --git a/app/src/main/res/drawable/power_outer_ring.xml b/app/src/main/res/drawable/power_outer_ring.xml
+new file mode 100644
+index 0000000..0b840bb
+--- /dev/null
++++ b/app/src/main/res/drawable/power_outer_ring.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
++    <solid android:color="@android:color/transparent" />
++    <stroke android:width="2dp" android:color="@color/ring_outer" />
++</shape>
+diff --git a/app/src/main/res/drawable/server_card.xml b/app/src/main/res/drawable/server_card.xml
+new file mode 100644
+index 0000000..fb8b91e
+--- /dev/null
++++ b/app/src/main/res/drawable/server_card.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<selector xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:state_pressed="true">
++        <shape android:shape="rectangle"><solid android:color="#292E58"/><stroke android:width="1dp" android:color="#5B61A0"/><corners android:radius="18dp"/></shape>
++    </item>
++    <item>
++        <shape android:shape="rectangle"><solid android:color="@color/surface"/><stroke android:width="1dp" android:color="@color/surface_border"/><corners android:radius="18dp"/></shape>
++    </item>
++</selector>
+diff --git a/app/src/main/res/drawable/server_icon_background.xml b/app/src/main/res/drawable/server_icon_background.xml
+new file mode 100644
+index 0000000..9b4941e
+--- /dev/null
++++ b/app/src/main/res/drawable/server_icon_background.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
++    <solid android:color="#31265F" />
++</shape>
+diff --git a/app/src/main/res/drawable/stat_card.xml b/app/src/main/res/drawable/stat_card.xml
+new file mode 100644
+index 0000000..549b031
+--- /dev/null
++++ b/app/src/main/res/drawable/stat_card.xml
+@@ -0,0 +1,6 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
++    <solid android:color="@color/surface" />
++    <stroke android:width="1dp" android:color="@color/surface_border" />
++    <corners android:radius="18dp" />
++</shape>
+diff --git a/app/src/main/res/layout/connect.xml b/app/src/main/res/layout/connect.xml
+new file mode 100644
+index 0000000..7a3d7ea
+--- /dev/null
++++ b/app/src/main/res/layout/connect.xml
+@@ -0,0 +1,100 @@
++<?xml version="1.0" encoding="utf-8"?>
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent"
++    android:orientation="vertical"
++    android:paddingStart="18dp"
++    android:paddingEnd="18dp"
++    android:paddingBottom="10dp">
++
++    <TextView
++        android:id="@+id/connect_state"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:gravity="center"
++        android:text="@string/state_disconnected_short"
++        android:textColor="@color/text_primary"
++        android:textSize="25sp"
++        android:textStyle="bold" />
++    <TextView
++        android:id="@+id/connection_time"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="2dp"
++        android:gravity="center"
++        android:text="@string/tap_to_connect"
++        android:textColor="@color/text_secondary"
++        android:textSize="14sp" />
++
++    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="18dp" android:orientation="horizontal">
++        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
++            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/tunnel_ip" android:textColor="@color/text_secondary" android:textSize="12sp" />
++            <TextView android:id="@+id/tunnel_ip_value" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:text="@string/value_unavailable" android:textColor="@color/text_primary" android:textSize="17sp" android:textStyle="bold" />
++        </LinearLayout>
++        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:gravity="end" android:orientation="vertical">
++            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/relay_ip" android:textColor="@color/text_secondary" android:textSize="12sp" />
++            <TextView android:id="@+id/relay_ip_value" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:text="@string/value_unavailable" android:textColor="@color/text_primary" android:textSize="17sp" android:textStyle="bold" />
++        </LinearLayout>
++    </LinearLayout>
++
++    <LinearLayout android:layout_width="match_parent" android:layout_height="104dp" android:layout_marginTop="16dp" android:orientation="horizontal">
++        <LinearLayout android:layout_width="0dp" android:layout_height="match_parent" android:layout_marginEnd="6dp" android:layout_weight="1" android:background="@drawable/stat_card" android:gravity="center_vertical" android:orientation="vertical" android:padding="14dp">
++            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/download" android:textColor="@color/smart_green" android:textSize="13sp" android:textStyle="bold" />
++            <TextView android:id="@+id/download_speed" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:text="@string/zero_speed" android:textColor="@color/text_primary" android:textSize="21sp" />
++            <TextView android:id="@+id/download_total" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/zero_total" android:textColor="@color/text_secondary" android:textSize="12sp" />
++        </LinearLayout>
++        <LinearLayout android:layout_width="0dp" android:layout_height="match_parent" android:layout_marginStart="6dp" android:layout_weight="1" android:background="@drawable/stat_card" android:gravity="center_vertical" android:orientation="vertical" android:padding="14dp">
++            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/upload" android:textColor="@color/smart_purple_light" android:textSize="13sp" android:textStyle="bold" />
++            <TextView android:id="@+id/upload_speed" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:text="@string/zero_speed" android:textColor="@color/text_primary" android:textSize="21sp" />
++            <TextView android:id="@+id/upload_total" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/zero_total" android:textColor="@color/text_secondary" android:textSize="12sp" />
++        </LinearLayout>
++    </LinearLayout>
++
++    <Space android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
++
++    <LinearLayout
++        android:id="@+id/selected_server_button"
++        android:layout_width="match_parent"
++        android:layout_height="72dp"
++        android:background="@drawable/server_card"
++        android:clickable="true"
++        android:focusable="true"
++        android:gravity="center_vertical"
++        android:orientation="horizontal"
++        android:paddingStart="16dp"
++        android:paddingEnd="14dp">
++        <ImageView android:layout_width="38dp" android:layout_height="38dp" android:background="@drawable/server_icon_background" android:padding="8dp" android:src="@drawable/ic_servers" />
++        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_marginStart="13dp" android:layout_weight="1" android:orientation="vertical">
++            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/selected_server" android:textColor="@color/text_secondary" android:textSize="11sp" />
++            <TextView android:id="@+id/selected_server_name" android:layout_width="match_parent" android:layout_height="wrap_content" android:ellipsize="end" android:maxLines="1" android:text="@string/no_profile_selected" android:textColor="@color/text_primary" android:textSize="15sp" android:textStyle="bold" />
++            <TextView android:id="@+id/selected_server_address" android:layout_width="match_parent" android:layout_height="wrap_content" android:ellipsize="middle" android:maxLines="1" android:text="@string/tap_to_choose_server" android:textColor="@color/text_secondary" android:textSize="11sp" />
++        </LinearLayout>
++        <ImageView android:layout_width="22dp" android:layout_height="22dp" android:src="@drawable/ic_chevron_right" />
++    </LinearLayout>
++
++    <TextView
++        android:id="@+id/smart_relay_state"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="6dp"
++        android:ellipsize="end"
++        android:gravity="center"
++        android:maxLines="1"
++        android:text="@string/smart_relay_ready"
++        android:textColor="@color/text_secondary"
++        android:textSize="11sp" />
++
++    <FrameLayout android:layout_width="176dp" android:layout_height="176dp" android:layout_gravity="center_horizontal" android:layout_marginTop="4dp">
++        <View android:layout_width="176dp" android:layout_height="176dp" android:layout_gravity="center" android:background="@drawable/power_outer_ring" />
++        <View android:layout_width="154dp" android:layout_height="154dp" android:layout_gravity="center" android:background="@drawable/power_inner_ring" />
++        <ImageButton
++            android:id="@+id/connect_button"
++            android:layout_width="126dp"
++            android:layout_height="126dp"
++            android:layout_gravity="center"
++            android:background="@drawable/power_button_disconnected"
++            android:contentDescription="@string/connect"
++            android:padding="36dp"
++            android:src="@drawable/ic_power" />
++    </FrameLayout>
++</LinearLayout>
+diff --git a/app/src/main/res/layout/main_activity.xml b/app/src/main/res/layout/main_activity.xml
+new file mode 100644
+index 0000000..5e3a830
+--- /dev/null
++++ b/app/src/main/res/layout/main_activity.xml
+@@ -0,0 +1,94 @@
++<?xml version="1.0" encoding="utf-8"?>
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent"
++    android:background="@color/app_background"
++    android:orientation="vertical">
++
++    <LinearLayout
++        android:layout_width="match_parent"
++        android:layout_height="60dp"
++        android:gravity="center_vertical"
++        android:orientation="horizontal"
++        android:paddingStart="20dp"
++        android:paddingEnd="12dp">
++        <TextView
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_weight="1"
++            android:text="@string/app_short"
++            android:textColor="@color/text_primary"
++            android:textSize="22sp"
++            android:textStyle="bold" />
++        <ImageButton
++            android:id="@+id/main_settings"
++            android:layout_width="48dp"
++            android:layout_height="48dp"
++            android:background="@drawable/icon_button_background"
++            android:contentDescription="@string/generalsettings"
++            android:padding="12dp"
++            android:src="@drawable/ic_settings" />
++    </LinearLayout>
++
++    <FrameLayout
++        android:id="@+id/main_content"
++        android:layout_width="match_parent"
++        android:layout_height="0dp"
++        android:layout_weight="1" />
++
++    <LinearLayout
++        android:id="@+id/bottom_navigation"
++        android:layout_width="match_parent"
++        android:layout_height="76dp"
++        android:background="@color/bottom_bar"
++        android:gravity="center"
++        android:orientation="horizontal"
++        android:paddingStart="10dp"
++        android:paddingTop="7dp"
++        android:paddingEnd="10dp"
++        android:paddingBottom="7dp">
++
++        <LinearLayout
++            android:id="@+id/nav_connect"
++            android:layout_width="0dp"
++            android:layout_height="match_parent"
++            android:layout_marginEnd="6dp"
++            android:layout_weight="1"
++            android:clickable="true"
++            android:focusable="true"
++            android:gravity="center"
++            android:orientation="vertical">
++            <ImageView android:layout_width="25dp" android:layout_height="25dp" android:src="@drawable/ic_power_small" />
++            <TextView android:id="@+id/nav_connect_label" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="@string/connect" android:textSize="12sp" android:textStyle="bold" />
++        </LinearLayout>
++
++        <LinearLayout
++            android:id="@+id/nav_servers"
++            android:layout_width="0dp"
++            android:layout_height="match_parent"
++            android:layout_marginStart="3dp"
++            android:layout_marginEnd="3dp"
++            android:layout_weight="1"
++            android:clickable="true"
++            android:focusable="true"
++            android:gravity="center"
++            android:orientation="vertical">
++            <ImageView android:layout_width="25dp" android:layout_height="25dp" android:src="@drawable/ic_servers" />
++            <TextView android:id="@+id/nav_servers_label" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="@string/servers" android:textSize="12sp" android:textStyle="bold" />
++        </LinearLayout>
++
++        <LinearLayout
++            android:id="@+id/nav_log"
++            android:layout_width="0dp"
++            android:layout_height="match_parent"
++            android:layout_marginStart="6dp"
++            android:layout_weight="1"
++            android:clickable="true"
++            android:focusable="true"
++            android:gravity="center"
++            android:orientation="vertical">
++            <ImageView android:layout_width="25dp" android:layout_height="25dp" android:src="@drawable/ic_log" />
++            <TextView android:id="@+id/nav_log_label" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="@string/log" android:textSize="12sp" android:textStyle="bold" />
++        </LinearLayout>
++    </LinearLayout>
++</LinearLayout>
+diff --git a/app/src/main/res/layout/vpn_list_item.xml b/app/src/main/res/layout/vpn_list_item.xml
+index 0812762..c023e46 100644
+--- a/app/src/main/res/layout/vpn_list_item.xml
++++ b/app/src/main/res/layout/vpn_list_item.xml
+@@ -1,69 +1,16 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<!--
+-     Copyright (C) 2011 The Android Open Source Project
+-
+-     Licensed under the Apache License, Version 2.0 (the "License");
+-     you may not use this file except in compliance with the License.
+-     You may obtain a copy of the License at
+-
+-          http://www.apache.org/licenses/LICENSE-2.0
+-
+-     Unless required by applicable law or agreed to in writing, software
+-     distributed under the License is distributed on an "AS IS" BASIS,
+-     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-     See the License for the specific language governing permissions and
+-     limitations under the License.
+--->
+-
+ <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+     android:layout_width="match_parent"
+-    android:layout_height="wrap_content"
++    android:layout_height="76dp"
++    android:background="@drawable/server_card"
+     android:gravity="center_vertical"
+-    android:minHeight="?android:attr/listPreferredItemHeight" >
+-
+-    <LinearLayout
+-        android:id="@+id/vpn_list_item_left"
+-        android:layout_width="0dp"
+-        android:layout_height="match_parent"
+-        android:layout_weight="1"
+-        android:background="?android:attr/selectableItemBackground"
+-        android:gravity="center_vertical" >
+-
+-        <LinearLayout
+-            android:id="@android:id/widget_frame"
+-            android:layout_width="wrap_content"
+-            android:layout_height="match_parent"
+-            android:gravity="center_vertical"
+-            android:orientation="vertical" />
+-
+-               <TextView
+-                android:id="@+id/vpn_item_title"
+-                android:layout_width="wrap_content"
+-                android:layout_height="wrap_content"
+-                android:ellipsize="marquee"
+-                android:fadingEdge="horizontal"
+-                android:singleLine="true"
+-                android:textAppearance="?android:attr/textAppearanceMedium" />
+-
++    android:orientation="horizontal"
++    android:paddingStart="14dp"
++    android:paddingEnd="8dp">
++    <LinearLayout android:id="@+id/vpn_list_item_left" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:background="?android:attr/selectableItemBackground" android:gravity="center_vertical">
++        <LinearLayout android:id="@android:id/widget_frame" android:layout_width="wrap_content" android:layout_height="match_parent" android:gravity="center_vertical" android:orientation="vertical" />
++        <ImageView android:layout_width="38dp" android:layout_height="38dp" android:background="@drawable/server_icon_background" android:padding="8dp" android:src="@drawable/ic_servers" />
++        <TextView android:id="@+id/vpn_item_title" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_marginStart="14dp" android:layout_weight="1" android:ellipsize="end" android:maxLines="1" android:textColor="@color/text_primary" android:textSize="17sp" android:textStyle="bold" />
+     </LinearLayout>
+-
+-    <View
+-        android:layout_width="2dip"
+-        android:layout_height="match_parent"
+-        android:layout_marginBottom="5dip"
+-        android:focusable="false"
+-        android:layout_marginTop="5dip"
+-        android:background="@android:drawable/divider_horizontal_dark" />
+-
+-    <ImageView
+-        android:id="@+id/quickedit_settings"
+-        android:layout_width="wrap_content"
+-        android:layout_height="fill_parent"
+-        android:layout_gravity="center"
+-        android:background="?android:attr/selectableItemBackground"
+-        android:contentDescription="@string/configure_the_vpn"
+-        android:paddingStart="15dip"
+-        android:paddingEnd="?android:attr/scrollbarSize"
+-        android:src="@drawable/ic_sysbar_quicksettings" />
+-
++    <ImageView android:id="@+id/quickedit_settings" android:layout_width="48dp" android:layout_height="match_parent" android:background="?android:attr/selectableItemBackground" android:contentDescription="@string/configure_the_vpn" android:padding="13dp" android:src="@drawable/ic_edit" />
+ </LinearLayout>
+diff --git a/app/src/main/res/layout/vpn_profile_list.xml b/app/src/main/res/layout/vpn_profile_list.xml
+index 5650a99..ef8a443 100644
+--- a/app/src/main/res/layout/vpn_profile_list.xml
++++ b/app/src/main/res/layout/vpn_profile_list.xml
+@@ -4,69 +4,20 @@
+     android:layout_width="match_parent"
+     android:layout_height="match_parent"
+     android:orientation="vertical"
+-    android:paddingLeft="@dimen/stdpadding"
+-    android:paddingRight="@dimen/stdpadding" >
+-
+-    <ListView
+-        android:id="@android:id/list"
+-        android:layout_width="fill_parent"
+-        android:layout_height="0dip"
+-        android:layout_weight="1" />
+-
+-    <LinearLayout
+-        android:id="@+id/reconnect_box"
+-        android:layout_width="fill_parent"
+-        android:layout_height="wrap_content"
+-        android:orientation="vertical"
+-		android:visibility="gone" >
+-
+-        <View
+-	    	android:layout_width="fill_parent"
+-	    	android:layout_height="1dp"
+-	    	android:layout_marginTop="10dp"
+-	    	android:layout_marginBottom="10dp"
+-	    	android:background="@android:color/darker_gray"/>
+-
+-	    <Button
+-	        android:id="@+id/reconnect_button"
+-	        android:layout_width="fill_parent"
+-	        android:layout_height="wrap_content" />
+-
+-	</LinearLayout>
+-
+-    <LinearLayout
+-        android:id="@android:id/empty"
+-        android:layout_width="match_parent"
+-        android:layout_height="match_parent"
+-        android:gravity="center"
+-        android:orientation="vertical" >
+-
+-        <TextView
+-            android:layout_width="fill_parent"
+-            android:layout_height="wrap_content"
+-            android:text="@string/no_vpn_profiles_defined"
+-            android:textAppearance="?android:attr/textAppearanceMedium" />
+-
+-        <Space
+-            android:layout_width="match_parent"
+-            android:layout_height="12sp" />
+-
+-        <TextView
+-            android:id="@+id/add_new_vpn_hint"
+-            android:layout_width="fill_parent"
+-            android:layout_height="wrap_content"
+-            tools:ignore="SelectableText" />
+-
+-        <Space
+-            android:layout_width="match_parent"
+-            android:layout_height="12sp" />
+-
+-        <TextView
+-            android:layout_width="fill_parent"
+-            android:layout_height="wrap_content"
+-            android:text="@string/faq_hint"
+-            tools:ignore="SelectableText" />
+-
++    android:paddingStart="16dp"
++    android:paddingEnd="16dp"
++    android:paddingBottom="12dp">
++    <LinearLayout android:layout_width="match_parent" android:layout_height="56dp" android:gravity="center_vertical" android:orientation="horizontal">
++        <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="@string/servers" android:textColor="@color/text_primary" android:textSize="25sp" android:textStyle="bold" />
++        <Button android:id="@+id/add_server_button" android:layout_width="wrap_content" android:layout_height="44dp" android:background="@drawable/add_server_button" android:minWidth="0dp" android:paddingStart="16dp" android:paddingEnd="16dp" android:text="@string/add_server" android:textAllCaps="false" android:textColor="@color/text_primary" />
++    </LinearLayout>
++    <ListView android:id="@android:id/list" android:layout_width="match_parent" android:layout_height="0dp" android:layout_marginTop="8dp" android:layout_weight="1" android:divider="@android:color/transparent" android:dividerHeight="10dp" android:listSelector="@android:color/transparent" />
++    <LinearLayout android:id="@+id/reconnect_box" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
++        <Button android:id="@+id/reconnect_button" android:layout_width="match_parent" android:layout_height="wrap_content" />
++    </LinearLayout>
++    <LinearLayout android:id="@android:id/empty" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:gravity="center" android:orientation="vertical" android:padding="28dp">
++        <ImageView android:layout_width="56dp" android:layout_height="56dp" android:src="@drawable/ic_servers" />
++        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:gravity="center" android:text="@string/no_vpn_profiles_defined" android:textColor="@color/text_primary" android:textSize="18sp" android:textStyle="bold" />
++        <TextView android:id="@+id/add_new_vpn_hint" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:gravity="center" android:textColor="@color/text_secondary" tools:ignore="SelectableText" />
+     </LinearLayout>
+-
+ </LinearLayout>
+diff --git a/app/src/main/res/values/colors.xml b/app/src/main/res/values/colors.xml
+new file mode 100644
+index 0000000..64d8304
+--- /dev/null
++++ b/app/src/main/res/values/colors.xml
+@@ -0,0 +1,15 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <color name="app_background">#0B1024</color>
++    <color name="bottom_bar">#151938</color>
++    <color name="surface">#191E3E</color>
++    <color name="surface_border">#343A62</color>
++    <color name="text_primary">#F5F3FF</color>
++    <color name="text_secondary">#9EA4BE</color>
++    <color name="smart_purple">#7657E8</color>
++    <color name="smart_purple_light">#B98AF9</color>
++    <color name="smart_green">#29D4A3</color>
++    <color name="smart_amber">#FFC857</color>
++    <color name="ring_outer">#24485D66</color>
++    <color name="ring_inner">#305B64A8</color>
++</resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index fe59fc1..4c82ae8 100755
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -2,7 +2,7 @@
+ <!-- Generated by crowdin.net -->
+ <resources>
+ 
+-    <string name="app">OpenConnect</string>
++    <string name="app">Smart OpenConnect</string>
+     <string name="ok">OK</string>
+     <string name="cancel">Cancel</string>
+     <string name="next">Next</string>
+@@ -163,4 +163,31 @@
+     <string name="cert_warning_always_connect">Always connect</string>
+     <string name="vpn_protocol">VPN Protocol</string>
+ 
++
++    <string name="connect">Connect</string>
++    <string name="servers">Servers</string>
++    <string name="selected_server">Selected server</string>
++    <string name="no_profile_selected">Choose a server</string>
++    <string name="state_disconnected_short">Disconnected</string>
++    <string name="cancel_connection">Cancel</string>
++    <string name="smart_relay">Smart Relay</string>
++    <string name="smart_relay_summary">Discover and probe relay IPs before connecting while preserving the original hostname and TLS SNI</string>
++    <string name="smart_relay_ready">Smart Relay: ON - relay will be selected automatically</string>
++    <string name="smart_relay_using">Smart Relay: ON - last relay %1$s</string>
++    <string name="smart_relay_off">Smart Relay: OFF - standard DNS mode</string>
++    <string name="smart_relay_no_profile">Smart Relay: choose a server first</string>
++    <string name="app_short">Smart Connect</string>
++    <string name="tap_to_connect">Tap the button to connect</string>
++    <string name="working">Connecting securely&#8230;</string>
++    <string name="tunnel_ip">Tunnel IP</string>
++    <string name="relay_ip">Relay IP</string>
++    <string name="download">Download</string>
++    <string name="upload">Upload</string>
++    <string name="zero_speed">0 B/s</string>
++    <string name="zero_total">0 B total</string>
++    <string name="total_format">%1$s total</string>
++    <string name="value_unavailable">-</string>
++    <string name="tap_to_choose_server">Tap to choose a server</string>
++    <string name="add_server">+ Add</string>
++
+ </resources>
+diff --git a/app/src/main/res/values/styles.xml b/app/src/main/res/values/styles.xml
+index 6535a09..525f333 100644
+--- a/app/src/main/res/values/styles.xml
++++ b/app/src/main/res/values/styles.xml
+@@ -20,4 +20,13 @@
+ 
+     <dimen name="stdpadding">8dp</dimen>
+ 
+-</resources>
+\ No newline at end of file
++    <style name="SmartConnectMainTheme" parent="android:style/Theme.Material.NoActionBar">
++        <item name="android:fontFamily">sans</item>
++        <item name="android:windowLightStatusBar">false</item>
++        <item name="android:statusBarColor">@color/app_background</item>
++        <item name="android:navigationBarColor">@color/bottom_bar</item>
++        <item name="android:windowActionModeOverlay">true</item>
++        <item name="android:colorAccent">@color/smart_purple</item>
++    </style>
++
++</resources>
+diff --git a/app/src/main/res/xml/pref_openconnect.xml b/app/src/main/res/xml/pref_openconnect.xml
+index 248a452..5d6ee0b 100644
+--- a/app/src/main/res/xml/pref_openconnect.xml
++++ b/app/src/main/res/xml/pref_openconnect.xml
+@@ -21,6 +21,11 @@
+             android:dialogMessage="@string/add_profile_hostname_prompt"
+             android:inputType="textUri"
+             android:defaultValue="" />
++        <CheckBoxPreference
++            android:key="smart_relay"
++            android:title="@string/smart_relay"
++            android:summary="@string/smart_relay_summary"
++            android:defaultValue="true" />
+         <net.openconnect_vpn.android.ShowTextPreference
+             android:key="ca_certificate"
+             android:title="@string/ca_certificate"
+diff --git a/external/openconnect/java/src/org/infradead/libopenconnect/LibOpenConnect.java b/external/openconnect/java/src/org/infradead/libopenconnect/LibOpenConnect.java
+index d139317..b2a0e59 100644
+--- a/external/openconnect/java/src/org/infradead/libopenconnect/LibOpenConnect.java
++++ b/external/openconnect/java/src/org/infradead/libopenconnect/LibOpenConnect.java
+@@ -135,6 +135,7 @@ public abstract class LibOpenConnect {
+ 	public synchronized native void setSNI(String sni);
+ 	public synchronized native void setXMLSHA1(String hash);
+ 	public synchronized native void setHostname(String hostname);
++	public synchronized native int setResolve(String hostname, String ip);
+ 	public synchronized native void setVersionString(String version);
+ 	public synchronized native void setUseragent(String useragent);
+ 	public synchronized native void setUrlpath(String urlpath);
+diff --git a/external/openconnect/jni.c b/external/openconnect/jni.c
+index 112080c..e24ef98 100644
+--- a/external/openconnect/jni.c
++++ b/external/openconnect/jni.c
+@@ -20,6 +20,7 @@
+ #include <jni.h>
+ 
+ #include <unistd.h>
++#include <netdb.h>
+ #include <sys/types.h>
+ 
+ #include <errno.h>
+@@ -28,6 +29,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <strings.h>
+ 
+ struct libctx {
+ 	JNIEnv *jenv;
+@@ -36,6 +38,8 @@ struct libctx {
+ 	struct openconnect_info *vpninfo;
+ 	int cmd_fd;
+ 	int loglevel;
++	char *resolve_host;
++	char *resolve_ip;
+ };
+ 
+ static void throw_excep(JNIEnv *jenv, const char *exc, int line)
+@@ -62,6 +66,25 @@ static struct libctx *getctx(JNIEnv *jenv, jobject jobj)
+ 	return (void *)(unsigned long)(*jenv)->GetLongField(jenv, jobj, jfld);
+ }
+ 
++
++/* Android Smart Relay: libopenconnect keeps the logical hostname, while this
++ * getaddrinfo override pins only that hostname to the relay IP selected by the
++ * Java health checker. SNI, certificate callbacks and HTTP Host therefore keep
++ * using the original DNS name. */
++static int smart_relay_getaddrinfo(void *cbdata, const char *node,
++                                  const char *service,
++                                  const struct addrinfo *hints,
++                                  struct addrinfo **res)
++{
++	struct libctx *ctx = cbdata;
++
++	if (ctx && ctx->resolve_host && ctx->resolve_ip && node &&
++	    !strcasecmp(node, ctx->resolve_host))
++		return getaddrinfo(ctx->resolve_ip, service, hints, res);
++
++	return getaddrinfo(node, service, hints, res);
++}
++
+ /*
+  * GetMethodID() and GetFieldID() and NewStringUTF() will automatically throw exceptions on error
+  */
+@@ -673,6 +696,8 @@ JNIEXPORT void JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_free(
+ 	if (!ctx)
+ 		return;
+ 	openconnect_vpninfo_free(ctx->vpninfo);
++	free(ctx->resolve_host);
++	free(ctx->resolve_ip);
+ 	(*jenv)->DeleteGlobalRef(jenv, ctx->async_lock);
+ 	(*jenv)->DeleteGlobalRef(jenv, ctx->jobj);
+ 	free(ctx);
+@@ -1411,6 +1436,48 @@ JNIEXPORT void JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_setXMLSH
+ 	SET_STRING_END();
+ }
+ 
++JNIEXPORT jint JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_setResolve(
++	JNIEnv *jenv, jobject jobj, jstring jhost, jstring jip)
++{
++	struct libctx *ctx = getctx(jenv, jobj);
++	const char *host = NULL, *ip = NULL;
++	char *new_host = NULL, *new_ip = NULL;
++
++	if (!ctx)
++		return -EINVAL;
++	if (get_cstring(jenv, jhost, &host) || get_cstring(jenv, jip, &ip))
++		goto out;
++
++	if (host && ip) {
++		new_host = strdup(host);
++		new_ip = strdup(ip);
++		if (!new_host || !new_ip) {
++			free(new_host);
++			free(new_ip);
++			new_host = new_ip = NULL;
++			OOM(jenv);
++			goto out;
++		}
++	}
++
++	free(ctx->resolve_host);
++	free(ctx->resolve_ip);
++	ctx->resolve_host = new_host;
++	ctx->resolve_ip = new_ip;
++
++	openconnect_override_getaddrinfo(ctx->vpninfo,
++		(ctx->resolve_host && ctx->resolve_ip) ? smart_relay_getaddrinfo : NULL);
++
++	release_cstring(jenv, jhost, host);
++	release_cstring(jenv, jip, ip);
++	return 0;
++
++out:
++	release_cstring(jenv, jhost, host);
++	release_cstring(jenv, jip, ip);
++	return -ENOMEM;
++}
++
+ JNIEXPORT void JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_setHostname(
+ 	JNIEnv *jenv, jobject jobj, jstring jarg)
+ {

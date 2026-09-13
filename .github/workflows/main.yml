@@ -1,0 +1,235 @@
+name: Build Smart Open Connect 0.3.3
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - smart-openconnect-0.2-ui.patch
+      - smart-openconnect-apk2.py
+      - smart-openconnect-0.3.1-hotfix.py
+      - smart-openconnect-0.3.2-signing.py
+      - smart-openconnect-0.3.3-release.py
+      - .github/workflows/**
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify patches
+        run: |
+          test -s smart-openconnect-0.2-ui.patch
+          test -s smart-openconnect-apk2.py
+          test -s smart-openconnect-0.3.1-hotfix.py
+          test -s smart-openconnect-0.3.2-signing.py
+          test -s smart-openconnect-0.3.3-release.py
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Restore stable SmartConnect signing key
+        env:
+          SMARTCONNECT_DEBUG_KEYSTORE_B64: ${{ secrets.SMARTCONNECT_DEBUG_KEYSTORE_B64 }}
+        run: |
+          test -n "$SMARTCONNECT_DEBUG_KEYSTORE_B64"
+          mkdir -p "$HOME/.android"
+          printf '%s' "$SMARTCONNECT_DEBUG_KEYSTORE_B64" | base64 --decode > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+          test -s "$HOME/.android/debug.keystore"
+          LC_ALL=C keytool -list -v \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android \
+            -alias androiddebugkey | \
+            grep -F 'SHA256: D5:1B:2B:0C:B3:20:AA:D1:62:61:64:1A:1D:CE:C7:CE:92:CC:D6:A9:DC:29:DD:70:2D:B9:5E:8B:58:B1:C2:CC'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK and NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "build-tools;34.0.0" "platforms;android-35" "ndk;27.2.12479018"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ant autoconf automake libtool libtool-bin \
+            pkg-config gettext autopoint gperf bison flex patch curl wget \
+            xz-utils unzip git perl python3 python-is-python3 ca-certificates
+
+      - name: Fetch OpenConnect Android 1.12
+        run: |
+          curl -fL --retry 5 --retry-delay 2 \
+            https://f-droid.org/repo/net.openconnect_vpn.android_1120_src.tar.gz \
+            -o upstream.tar.gz
+          mkdir source
+          tar -xf upstream.tar.gz -C source --strip-components=1
+          test -f source/app/build.gradle
+          test -f source/external/Makefile
+
+      - name: Configure Android paths
+        run: |
+          cat > source/local.properties <<EOF
+          sdk.dir=${ANDROID_HOME}
+          sdk-location=${ANDROID_HOME}
+          ndk.dir=${ANDROID_HOME}/ndk/27.2.12479018
+          ndk-location=${ANDROID_HOME}/ndk/27.2.12479018
+          EOF
+
+      - name: Apply Smart Relay and modern UI patch
+        run: |
+          cd source
+          patch -p1 --forward --batch < ../smart-openconnect-0.2-ui.patch
+          test -f app/src/main/java/net/openconnect_vpn/android/core/SmartRelaySelector.java
+          test -f app/src/main/res/drawable/ic_smartconnect_launcher.xml
+          grep -q 'net.openconnect_vpn.android.smart' app/build.gradle
+
+      - name: Apply APK2 four fixes
+        run: |
+          python3 smart-openconnect-apk2.py
+          sed -i '/android:windowActionModeOverlay/d' source/app/src/main/res/values/styles.xml
+          grep -q 'versionName "0.3.0-apk2"' source/app/build.gradle
+          grep -q 'mRepeatedForm' source/app/src/main/java/net/openconnect_vpn/android/AuthFormHandler.java
+          grep -q 'smart_relay_last_selected_ip_' source/app/src/main/java/net/openconnect_vpn/android/core/OpenConnectManagementThread.java
+          grep -q 'recent_profile_3' source/app/src/main/res/layout/connect.xml
+          grep -q 'PREF_RECENT_PROFILES' source/app/src/main/java/net/openconnect_vpn/android/fragments/ConnectFragment.java
+          ! grep -q 'android:windowActionModeOverlay' source/app/src/main/res/values/styles.xml
+
+      - name: Scope dark theme to Settings and validate manifest
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          path = Path("source/app/src/main/AndroidManifest.xml")
+          text = path.read_text(encoding="utf-8")
+          inserted = ('android:name="net.openconnect_vpn.android.Application"\n'
+                      '        android:theme="@style/SmartConnectAppTheme"')
+          original = 'android:name="net.openconnect_vpn.android.Application"'
+          if inserted not in text:
+              raise SystemExit("APK2 manifest hotfix: inserted application theme not found")
+          text = text.replace(inserted, original, 1)
+
+          settings_found = False
+          for activity_name in (".FragmentActivity", ".FragActivity", ".ConnectionEditorActivity"):
+              needle = f'android:name="{activity_name}"'
+              pos = text.find(needle)
+              if pos < 0:
+                  continue
+              tag_start = text.rfind("<activity", 0, pos)
+              tag_end = text.find(">", pos)
+              if tag_start < 0 or tag_end < 0:
+                  raise SystemExit(f"Malformed activity declaration for {activity_name}")
+              tag = text[tag_start:tag_end]
+              if activity_name in (".FragmentActivity", ".FragActivity"):
+                  settings_found = True
+              if "android:theme=" not in tag:
+                  insert_at = pos + len(needle)
+                  text = (text[:insert_at] +
+                          '\n            android:theme="@style/SmartConnectAppTheme"' +
+                          text[insert_at:])
+
+          if not settings_found:
+              raise SystemExit("APK2 manifest hotfix: Settings fragment activity not found")
+
+          path.write_text(text, encoding="utf-8")
+          tree = ET.parse(path)
+          android = "{http://schemas.android.com/apk/res/android}"
+          app = tree.getroot().find("application")
+          if app is None:
+              raise SystemExit("Manifest has no application element")
+          if app.get(android + "theme") == "@style/SmartConnectAppTheme":
+              raise SystemExit("SmartConnectAppTheme must not be application-wide")
+
+          themed_settings = False
+          for activity in app.findall("activity"):
+              name = activity.get(android + "name")
+              if name in (".FragmentActivity", ".FragActivity"):
+                  themed_settings = activity.get(android + "theme") == "@style/SmartConnectAppTheme"
+          if not themed_settings:
+              raise SystemExit("Settings activity does not have SmartConnectAppTheme")
+
+          print("Manifest XML valid; SmartConnectAppTheme scoped to Settings")
+          PY
+          grep -q 'SmartConnectAppTheme' source/app/src/main/res/values/styles.xml
+
+      - name: Apply 0.3.1 relay protect hotfix
+        run: |
+          python3 smart-openconnect-0.3.1-hotfix.py
+          grep -q 'versionName "0.3.1-relay-protect-hotfix"' source/app/build.gradle
+          grep -q 'raw.bind(new InetSocketAddress(0))' source/app/src/main/java/net/openconnect_vpn/android/core/SmartRelaySelector.java
+
+      - name: Apply 0.3.2 stable-signing baseline
+        run: |
+          python3 smart-openconnect-0.3.2-signing.py
+          grep -q 'versionCode 5' source/app/build.gradle
+          grep -q 'versionName "0.3.2-stable-signing"' source/app/build.gradle
+
+      - name: Apply 0.3.3 release overlay
+        run: |
+          python3 smart-openconnect-0.3.3-release.py
+          grep -q 'versionCode 6' source/app/build.gradle
+          grep -q 'versionName "0.3.3"' source/app/build.gradle
+          grep -q 'Smart Open Connect' source/app/src/main/res/values/strings.xml
+          grep -q '@mipmap/ic_smartconnect_launcher' source/app/src/main/AndroidManifest.xml
+          test -f source/app/src/main/res/mipmap-anydpi-v26/ic_smartconnect_launcher.xml
+          grep -q 'vhost-net unavailable on Android' source/app/src/main/java/net/openconnect_vpn/android/core/VPNLog.java
+          grep -q 'DTLS address not provided' source/app/src/main/java/net/openconnect_vpn/android/core/VPNLog.java
+
+      - name: Build native arm64-v8a
+        run: |
+          NDK_PATH="${ANDROID_HOME}/ndk/27.2.12479018"
+          OC_PREFIX="$GITHUB_WORKSPACE/source/external/arm64/openconnect/android/aarch64-linux-android/sysroot/usr"
+          mkdir -p "$OC_PREFIX/bin" "$OC_PREFIX/lib/pkgconfig"
+          make -C source/external \
+            install-arch-arm64 \
+            install-jar-openconnect-wrapper.jar \
+            install-jar-stoken-wrapper.jar \
+            NDK="$NDK_PATH" \
+            PREFIX="$OC_PREFIX"
+          test -f source/app/src/main/jniLibs/arm64-v8a/libopenconnect.so
+
+      - name: Build Android APK
+        run: |
+          cd source
+          gradle assembleDebug --no-daemon --stacktrace
+          test -f app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Sign APK with persistent Smart Open Connect key
+        run: |
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" sign \
+            --ks "$HOME/.android/debug.keystore" \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out SmartOpenConnect-0.3.3-arm64.apk \
+            source/app/build/outputs/apk/debug/app-debug.apk
+          test -s SmartOpenConnect-0.3.3-arm64.apk
+
+      - name: Verify release metadata and signature
+        run: |
+          SIG="$($ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs SmartOpenConnect-0.3.3-arm64.apk)"
+          printf '%s\n' "$SIG"
+          printf '%s\n' "$SIG" | grep -Fi 'Signer #1 certificate SHA-256 digest: d51b2b0cb320aad16261641a1dcec7ce92ccd6a9dc29dd702db95e8b58b1c2cc'
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging SmartOpenConnect-0.3.3-arm64.apk | tee apk-badging.txt
+          grep -q "versionCode='6'" apk-badging.txt
+          grep -q "versionName='0.3.3'" apk-badging.txt
+          grep -q "application-label:'Smart Open Connect'" apk-badging.txt
+
+      - name: Checksum
+        run: sha256sum SmartOpenConnect-0.3.3-arm64.apk > SmartOpenConnect-0.3.3-arm64.apk.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SmartOpenConnect-0.3.3-arm64
+          path: |
+            SmartOpenConnect-0.3.3-arm64.apk
+            SmartOpenConnect-0.3.3-arm64.apk.sha256
