@@ -593,7 +593,7 @@ new file mode 100644
 index 0000000..9efd82b
 --- /dev/null
 +++ b/app/src/main/java/net/openconnect_vpn/android/core/SmartRelaySelector.java
-@@ -0,0 +1,442 @@
+@@ -0,0 +1,436 @@
 +/*
 + * Smart relay discovery/selection for OpenConnect for Android.
 + *
