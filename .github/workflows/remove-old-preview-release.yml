@@ -1,0 +1,22 @@
+name: Remove obsolete preview release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/remove-old-preview-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Delete obsolete preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method DELETE repos/$GITHUB_REPOSITORY/releases/387981954
