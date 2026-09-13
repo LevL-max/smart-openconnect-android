@@ -52,7 +52,24 @@ replace_once(
     "render without mutating MRU",
 )
 
-# GUI hotfix 2: selecting from Servers must be committed synchronously before
+# GUI hotfix 2: a disconnected OpenVpnService may still retain the profile from
+# the previous tunnel. It must not overwrite or visually mask the profile the
+# user just selected. Only an active/connecting service owns the selection.
+replace_once(
+    connect,
+    '''                mConnectionState = service.getConnectionState();\n                if (service.profile != null)\n                    selectProfile(service.profile);\n                updateUI(service);''',
+    '''                mConnectionState = service.getConnectionState();\n                if (service.profile != null && mConnectionState != OpenConnectManagementThread.STATE_DISCONNECTED)\n                    selectProfile(service.profile);\n                updateUI(service);''',
+    "ignore stale disconnected service profile",
+)
+
+replace_once(
+    connect,
+    '''        VpnProfile p = service != null && service.profile != null ? service.profile : getSelectedProfile();''',
+    '''        VpnProfile p = service != null\n                && service.getConnectionState() != OpenConnectManagementThread.STATE_DISCONNECTED\n                && service.profile != null ? service.profile : getSelectedProfile();''',
+    "render explicit selection while disconnected",
+)
+
+# GUI hotfix 3: selecting from Servers must be committed synchronously before
 # returning to Connect, so the newly created ConnectFragment sees the new UUID.
 servers = ROOT / "app/src/main/java/net/openconnect_vpn/android/fragments/VPNProfileList.java"
 replace_once(
@@ -62,7 +79,7 @@ replace_once(
     "server-list synchronous selection",
 )
 
-# GUI hotfix 3: exactly three fixed-width recent-profile slots. Zero min width
+# GUI hotfix 4: exactly three fixed-width recent-profile slots. Zero min width
 # prevents long profile names/background minimums from pushing a chip off-screen.
 layout = ROOT / "app/src/main/res/layout/connect.xml"
 replace_once(
@@ -83,4 +100,4 @@ if text.count('android:id="@+id/recent_profile_') != 3:
     raise SystemExit("recent profile strip must contain exactly three slots")
 layout.write_text(text, encoding="utf-8")
 
-print("0.3.4 release overlay applied: stable server selection, stable MRU strip, provider-neutral relay discovery")
+print("0.3.4 release overlay applied: stale service profile blocked, stable server selection, stable MRU strip, provider-neutral relay discovery")
