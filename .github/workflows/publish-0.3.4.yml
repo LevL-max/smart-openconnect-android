@@ -1,0 +1,58 @@
+name: Publish Smart Open Connect 0.3.4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-0.3.4.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download exact tested artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release-artifact
+          gh run download 34783154257 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name SmartOpenConnect-0.3.4-arm64 \
+            --dir release-artifact
+          test -s release-artifact/SmartOpenConnect-0.3.4-arm64.apk
+          test -s release-artifact/SmartOpenConnect-0.3.4-arm64.apk.sha256
+
+      - name: Verify exact APK checksum
+        run: |
+          cd release-artifact
+          echo 'a14a55bde1b4786999920e7584834fb568a0d86b8f159a5a1fc965480415fcb1  SmartOpenConnect-0.3.4-arm64.apk' | sha256sum -c -
+          grep -q '^a14a55bde1b4786999920e7584834fb568a0d86b8f159a5a1fc965480415fcb1  SmartOpenConnect-0.3.4-arm64.apk$' SmartOpenConnect-0.3.4-arm64.apk.sha256
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.3.4 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'Release v0.3.4 already exists; refusing to overwrite it.' >&2
+            exit 1
+          fi
+          gh release create v0.3.4 \
+            release-artifact/SmartOpenConnect-0.3.4-arm64.apk \
+            release-artifact/SmartOpenConnect-0.3.4-arm64.apk.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target 3667e05781b96dca4415dd2465ae9a339c815db1 \
+            --title 'Smart Open Connect v0.3.4' \
+            --notes-file RELEASE_NOTES_0.3.4.md
+
+      - name: Verify published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view v0.3.4 --repo "$GITHUB_REPOSITORY" --json tagName,name,isDraft,isPrerelease,url
