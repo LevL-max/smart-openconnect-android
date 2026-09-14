@@ -1,0 +1,52 @@
+name: Publish Smart Open Connect 0.3.9
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-0.3.9.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download exact tested 0.3.9 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: SmartOpenConnect-0.3.9-arm64
+          path: dist
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 34818348752
+
+      - name: Verify tested APK
+        run: |
+          cd dist
+          test -f SmartOpenConnect-0.3.9-arm64.apk
+          test -f SmartOpenConnect-0.3.9-arm64.apk.sha256
+          sha256sum -c SmartOpenConnect-0.3.9-arm64.apk.sha256
+          test "$(sha256sum SmartOpenConnect-0.3.9-arm64.apk | awk '{print $1}')" = "fc6fff1ad52933681fe171375ea23229ee3053c9761c4788cfb4d93191c54d83"
+
+      - name: Publish v0.3.9
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.3.9 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v0.3.9 already exists; refusing to overwrite it."
+            exit 1
+          fi
+          gh release create v0.3.9 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target ded2c00d4da7f503b96b0b09205b13db3a366afd \
+            --title "Smart Open Connect 0.3.9" \
+            --notes-file RELEASE_NOTES_0.3.9.md \
+            dist/SmartOpenConnect-0.3.9-arm64.apk \
+            dist/SmartOpenConnect-0.3.9-arm64.apk.sha256
