@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parent / "source"
 
@@ -20,6 +21,7 @@ def replace_once(text, old, new, label):
     if count != 1:
         raise SystemExit(f"{label}: expected exactly one match, found {count}")
     return text.replace(old, new, 1)
+
 
 # Version bump.
 p = "app/build.gradle"
@@ -42,35 +44,46 @@ write(p, s)
 #   OFF -> stop the VPN, preserving the already validated 0.3.5 behavior.
 p = "app/src/main/java/net/openconnect_vpn/android/core/DeviceStateReceiver.java"
 s = read(p)
-old = '''        if (mNetworkType != -1 && mNetworkType != networkType) {
-        \tif (!mPaused) {
-        \t\tboolean reconnectOnChange = mPrefs.getBoolean("netchangereconnect", true);
-        \t\tif (reconnectOnChange) {
-        \t\t\tLog.i(TAG, "network changed: reconnecting VPN on new network");
-        \t\t\tmManagement.reconnect();
-        \t\t} else {
-        \t\t\tLog.i(TAG, "network changed: reconnect disabled; disconnecting VPN");
-        \t\t\tmManagement.stopVPN();
-        \t\t}
-        \t}
-        }'''
-new = '''        if (mNetworkType != -1 && mNetworkType != networkType) {
-        \tboolean reconnectOnChange = mPrefs.getBoolean("netchangereconnect", true);
-        \tif (reconnectOnChange) {
-        \t\tif (mPaused) {
-        \t\t\tLog.i(TAG, "network changed after transient loss: clearing pause before reconnect");
-        \t\t\tmManagement.resume();
-        \t\t\tmPaused = false;
-        \t\t}
-        \t\tLog.i(TAG, "network changed: reconnecting VPN on new network");
-        \t\tmManagement.reconnect();
-        \t} else {
-        \t\tLog.i(TAG, "network changed: reconnect disabled; disconnecting VPN");
-        \t\tmManagement.stopVPN();
-        \t\tmPaused = false;
-        \t}
-        }'''
-s = replace_once(s, old, new, "paused network-change reconnect block")
+
+pattern = re.compile(
+    r'(?P<indent>^[ \t]*)if \(mNetworkType != -1 && mNetworkType != networkType\) \{[ \t]*\n'
+    r'[ \t]*if \(!mPaused\) \{[ \t]*\n'
+    r'[ \t]*boolean reconnectOnChange = mPrefs\.getBoolean\("netchangereconnect", true\);[ \t]*\n'
+    r'[ \t]*if \(reconnectOnChange\) \{[ \t]*\n'
+    r'[ \t]*Log\.i\(TAG, "network changed: reconnecting VPN on new network"\);[ \t]*\n'
+    r'[ \t]*mManagement\.reconnect\(\);[ \t]*\n'
+    r'[ \t]*\} else \{[ \t]*\n'
+    r'[ \t]*Log\.i\(TAG, "network changed: reconnect disabled; disconnecting VPN"\);[ \t]*\n'
+    r'[ \t]*mManagement\.stopVPN\(\);[ \t]*\n'
+    r'[ \t]*\}[ \t]*\n'
+    r'[ \t]*\}[ \t]*\n'
+    r'[ \t]*\}',
+    flags=re.MULTILINE,
+)
+
+match = pattern.search(s)
+if not match:
+    raise SystemExit("paused network-change reconnect block not found")
+indent = match.group("indent")
+replacement = (
+    f'{indent}if (mNetworkType != -1 && mNetworkType != networkType) {{\n'
+    f'{indent}\tboolean reconnectOnChange = mPrefs.getBoolean("netchangereconnect", true);\n'
+    f'{indent}\tif (reconnectOnChange) {{\n'
+    f'{indent}\t\tif (mPaused) {{\n'
+    f'{indent}\t\t\tLog.i(TAG, "network changed after transient loss: clearing pause before reconnect");\n'
+    f'{indent}\t\t\tmManagement.resume();\n'
+    f'{indent}\t\t\tmPaused = false;\n'
+    f'{indent}\t\t}}\n'
+    f'{indent}\t\tLog.i(TAG, "network changed: reconnecting VPN on new network");\n'
+    f'{indent}\t\tmManagement.reconnect();\n'
+    f'{indent}\t}} else {{\n'
+    f'{indent}\t\tLog.i(TAG, "network changed: reconnect disabled; disconnecting VPN");\n'
+    f'{indent}\t\tmManagement.stopVPN();\n'
+    f'{indent}\t\tmPaused = false;\n'
+    f'{indent}\t}}\n'
+    f'{indent}}}'
+)
+s = s[:match.start()] + replacement + s[match.end():]
 write(p, s)
 
 print("0.3.6 overlay applied: reconnect survives transient no-network pause during cellular/Wi-Fi handoff")
