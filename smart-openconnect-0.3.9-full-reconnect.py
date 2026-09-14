@@ -40,12 +40,29 @@ write(p, s)
 # interval; stopVPN() in the service-side full restart clears mRequestPause.
 p = "app/src/main/java/net/openconnect_vpn/android/core/DeviceStateReceiver.java"
 s = read(p)
-s = replace_once(
-    s,
-    '''\t\tif (mPaused) {\n\t\t\tLog.i(TAG, "network changed after transient loss: clearing pause before reconnect");\n\t\t\tmManagement.resume();\n\t\t\tmPaused = false;\n\t\t}\n\t\tLog.i(TAG, "network changed: reconnecting VPN on new network");\n\t\tmManagement.reconnect();''',
-    '''\t\tif (mPaused) {\n\t\t\tLog.i(TAG, "network changed after transient loss: full reconnect will clear pause");\n\t\t\tmPaused = false;\n\t\t}\n\t\tLog.i(TAG, "network changed: starting full VPN reconnect on new network");\n\t\tmManagement.reconnect();''',
-    "DeviceStateReceiver full reconnect branch",
+pattern = re.compile(
+    r'(?P<indent>^[ \t]*)if \(mPaused\) \{[ \t]*\n'
+    r'[ \t]*Log\.i\(TAG, "network changed after transient loss: clearing pause before reconnect"\);[ \t]*\n'
+    r'[ \t]*mManagement\.resume\(\);[ \t]*\n'
+    r'[ \t]*mPaused = false;[ \t]*\n'
+    r'[ \t]*\}[ \t]*\n'
+    r'[ \t]*Log\.i\(TAG, "network changed: reconnecting VPN on new network"\);[ \t]*\n'
+    r'[ \t]*mManagement\.reconnect\(\);',
+    flags=re.MULTILINE,
 )
+match = pattern.search(s)
+if not match:
+    raise SystemExit("DeviceStateReceiver full reconnect branch not found")
+indent = match.group("indent")
+replacement = (
+    f'{indent}if (mPaused) {{\n'
+    f'{indent}\tLog.i(TAG, "network changed after transient loss: full reconnect will clear pause");\n'
+    f'{indent}\tmPaused = false;\n'
+    f'{indent}}}\n'
+    f'{indent}Log.i(TAG, "network changed: starting full VPN reconnect on new network");\n'
+    f'{indent}mManagement.reconnect();'
+)
+s = s[:match.start()] + replacement + s[match.end():]
 write(p, s)
 
 # Reinterpret management reconnect as a service-level full session restart.
