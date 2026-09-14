@@ -37,7 +37,7 @@ write(p, s)
 
 # ON must be a real new VPN session, not libopenconnect's in-place pause-based
 # reconnect. Avoid briefly resuming the old session after a transient no-network
-# interval; stopVPN() in the service-side full restart clears mRequestPause.
+# interval; the full restart stops the old management thread instead.
 p = "app/src/main/java/net/openconnect_vpn/android/core/DeviceStateReceiver.java"
 s = read(p)
 pattern = re.compile(
@@ -82,25 +82,21 @@ if n != 1:
 write(p, s)
 
 # Keep OpenVpnService alive while the old management thread exits, then create a
-# fresh thread using the same profile. This reruns Smart Relay + authentication on
-# the new uplink. A pending restart is cancelled by manual stop/service destroy.
+# fresh thread using the same profile. The restart runnable waits for the old Java
+# thread to be fully dead so a late threadDone() cannot tear down the new session.
 p = "app/src/main/java/net/openconnect_vpn/android/core/OpenVpnService.java"
 s = read(p)
 
-s = replace_once(
-    s,
-    '    private OpenConnectManagementThread mVPN;\n',
-    '    private OpenConnectManagementThread mVPN;\n'
-    '    private boolean mNetworkRestartPending;\n'
-    '    private Runnable mNetworkRestartRunnable;\n',
-    "OpenVpnService restart fields",
-)
-
-# Add helpers before the existing main-activity PendingIntent helper.
-marker = '    private PendingIntent getMainActivityIntent() {\n'
-if marker not in s:
+marker = "private PendingIntent getMainActivityIntent()"
+marker_pos = s.find(marker)
+if marker_pos < 0:
     raise SystemExit("OpenVpnService getMainActivityIntent marker not found")
-helper = r'''    private synchronized void cancelPendingNetworkRestart() {
+line_start = s.rfind("\n", 0, marker_pos) + 1
+
+block = r'''    private boolean mNetworkRestartPending;
+    private Runnable mNetworkRestartRunnable;
+
+    private synchronized void cancelPendingNetworkRestart() {
         if (mNetworkRestartRunnable != null) {
             mHandler.removeCallbacks(mNetworkRestartRunnable);
         }
@@ -127,11 +123,34 @@ helper = r'''    private synchronized void cancelPendingNetworkRestart() {
         doStopVPN();
 
         final Runnable restart = new Runnable() {
+            private int waits;
+
             @Override
             public void run() {
-                // Ensure the old management thread has completely exited before
-                // replacing service fields with a new session.
-                killVPNThread(true);
+                synchronized (OpenVpnService.this) {
+                    if (!mNetworkRestartPending) {
+                        return;
+                    }
+                }
+
+                // Do not race a late threadDone() from the old session against
+                // the replacement session. Wait until the old Java thread is
+                // truly no longer alive before assigning mVPN/mVPNThread again.
+                if (mVPNThread != null && mVPNThread.isAlive()) {
+                    waits++;
+                    if (waits >= 50) {
+                        Log.e(TAG, "NETWORK: old VPN thread did not terminate; aborting reconnect");
+                        synchronized (OpenVpnService.this) {
+                            mNetworkRestartPending = false;
+                            mNetworkRestartRunnable = null;
+                        }
+                        ProfileManager.setConnectedVpnProfileDisconnected();
+                        stopSelf();
+                        return;
+                    }
+                    mHandler.postDelayed(this, 100);
+                    return;
+                }
 
                 VpnProfile restartProfile = ProfileManager.get(uuid);
                 if (restartProfile == null) {
@@ -170,43 +189,65 @@ helper = r'''    private synchronized void cancelPendingNetworkRestart() {
         synchronized (this) {
             mNetworkRestartRunnable = restart;
         }
-        // The CONNECTED broadcast means a new uplink exists, but a short delay
-        // lets Android finish route/interface handoff before Smart Relay probes.
+        // Give Android a short moment to finish the route/interface handoff
+        // before the replacement session reruns Smart Relay and authentication.
         mHandler.postDelayed(restart, 600);
     }
 
 '''
-s = s.replace(marker, helper + marker, 1)
+s = s[:line_start] + block + s[line_start:]
 
-# When the old thread terminates as part of the controlled restart, do not stop
-# the service. The scheduled restart owns the service lifecycle at that point.
-thread_done = '    public synchronized void threadDone() {\n'
-if thread_done not in s:
+# When the old thread terminates as part of a controlled restart, keep the service
+# alive. The delayed restart runnable owns the lifecycle until a new thread starts.
+pattern = re.compile(r'(?P<indent>^[ \t]*)public synchronized void threadDone\(\) \{[ \t]*\n', re.MULTILINE)
+match = pattern.search(s)
+if not match:
     raise SystemExit("OpenVpnService threadDone marker not found")
-s = s.replace(
-    thread_done,
-    thread_done +
-    '        if (mNetworkRestartPending) {\n'
-    '            Log.i(TAG, "NETWORK: old VPN thread terminated; keeping service for restart");\n'
-    '            mVPN = null;\n'
-    '            return;\n'
-    '        }\n',
-    1,
+indent = match.group("indent")
+insert = (
+    match.group(0) +
+    f'{indent}\tif (mNetworkRestartPending) {{\n'
+    f'{indent}\t\tLog.i(TAG, "NETWORK: old VPN thread terminated; keeping service for restart");\n'
+    f'{indent}\t\tmVPN = null;\n'
+    f'{indent}\t\treturn;\n'
+    f'{indent}\t}}\n'
 )
+s = s[:match.start()] + insert + s[match.end():]
 
 # Manual user stop must never be followed by a delayed automatic restart.
-old_stop = '''    public void stopVPN() {\n        killVPNThread(false);\n        ProfileManager.setConnectedVpnProfileDisconnected();\n    }'''
-new_stop = '''    public void stopVPN() {\n        cancelPendingNetworkRestart();\n        killVPNThread(false);\n        ProfileManager.setConnectedVpnProfileDisconnected();\n    }'''
-s = replace_once(s, old_stop, new_stop, "OpenVpnService manual stop cancels restart")
+pattern = re.compile(
+    r'(?P<indent>^[ \t]*)public void stopVPN\(\) \{[ \t]*\n'
+    r'[ \t]*killVPNThread\(false\);[ \t]*\n'
+    r'[ \t]*ProfileManager\.setConnectedVpnProfileDisconnected\(\);[ \t]*\n'
+    r'[ \t]*\}',
+    re.MULTILINE,
+)
+match = pattern.search(s)
+if not match:
+    raise SystemExit("OpenVpnService stopVPN method not found")
+indent = match.group("indent")
+replacement = (
+    f'{indent}public void stopVPN() {{\n'
+    f'{indent}\tcancelPendingNetworkRestart();\n'
+    f'{indent}\tkillVPNThread(false);\n'
+    f'{indent}\tProfileManager.setConnectedVpnProfileDisconnected();\n'
+    f'{indent}}}'
+)
+s = s[:match.start()] + replacement + s[match.end():]
 
 # Service destruction also cancels any delayed reconnect runnable.
-pattern = re.compile(r'(public void onDestroy\(\) \{\s*\n)(\s*)killVPNThread\(true\);')
+pattern = re.compile(
+    r'(?P<head>(?P<indent>^[ \t]*)public void onDestroy\(\) \{[ \t]*\n)'
+    r'(?P<bodyindent>[ \t]*)killVPNThread\(true\);',
+    re.MULTILINE,
+)
 match = pattern.search(s)
 if not match:
     raise SystemExit("OpenVpnService onDestroy kill marker not found")
-indent = match.group(2)
-s = s[:match.start()] + match.group(1) + indent + 'cancelPendingNetworkRestart();\n' + indent + 'killVPNThread(true);' + s[match.end():]
+bodyindent = match.group("bodyindent")
+replacement = match.group("head") + bodyindent + 'cancelPendingNetworkRestart();\n' + bodyindent + 'killVPNThread(true);'
+s = s[:match.start()] + replacement + s[match.end():]
 
 write(p, s)
 
-print("0.3.9 overlay applied: network-change ON uses a fresh OpenConnect session; OFF remains stopVPN")
+print("0.3.9 overlay applied: network-change ON waits for old thread then starts a fresh OpenConnect session; OFF remains stopVPN")
