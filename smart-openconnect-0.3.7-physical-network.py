@@ -336,22 +336,17 @@ s = s.replace(marker, modern + marker, 1)
 write(p, s)
 
 # Register/unregister the modern monitor with the service lifecycle while keeping
-# the legacy BroadcastReceiver registered as a fallback only. These use regexes
-# deliberately because the maintained 1.12 source and our base patch do not use
-# identical tab/space indentation in OpenVpnService.java.
+# the legacy BroadcastReceiver registered as a fallback only. Anchor only on the
+# unique receiver calls so this remains robust across indentation/constructor changes.
 p = "app/src/main/java/net/openconnect_vpn/android/core/OpenVpnService.java"
 s = read(p)
 
-register_pattern = (
-    r'(?P<indent>^[ \t]*)mDeviceStateReceiver\s*=\s*new DeviceStateReceiver\(management,\s*mPrefs\);\s*\n'
-    r'(?P=indent)registerReceiver\(mDeviceStateReceiver,\s*filter\);'
-)
+register_pattern = r'(?P<indent>^[ \t]*)registerReceiver\(mDeviceStateReceiver,\s*filter\);'
 register_match = re.search(register_pattern, s, flags=re.MULTILINE)
 if not register_match:
-    raise SystemExit("register modern physical network callback: expected exactly one match, found 0")
+    raise SystemExit("register modern physical network callback: receiver anchor not found")
 indent = register_match.group('indent')
 register_replacement = (
-    f'{indent}mDeviceStateReceiver = new DeviceStateReceiver(management, mPrefs);\n'
     f'{indent}mDeviceStateReceiver.registerModernNetworkCallback(this);\n'
     f'{indent}registerReceiver(mDeviceStateReceiver, filter);'
 )
@@ -359,21 +354,14 @@ s, count = re.subn(register_pattern, register_replacement, s, count=1, flags=re.
 if count != 1:
     raise SystemExit(f"register modern physical network callback: expected exactly one replacement, found {count}")
 
-unregister_pattern = (
-    r'(?P<indent>^[ \t]*)if\s*\(mDeviceStateReceiver\s*!=\s*null\)\s*\{\s*\n'
-    r'(?P<bodyindent>[ \t]+)unregisterReceiver\(mDeviceStateReceiver\);\s*\n'
-    r'(?P=indent)\}'
-)
+unregister_pattern = r'(?P<indent>^[ \t]*)unregisterReceiver\(mDeviceStateReceiver\);'
 unregister_match = re.search(unregister_pattern, s, flags=re.MULTILINE)
 if not unregister_match:
-    raise SystemExit("unregister modern physical network callback: expected exactly one match, found 0")
+    raise SystemExit("unregister modern physical network callback: receiver anchor not found")
 indent = unregister_match.group('indent')
-bodyindent = unregister_match.group('bodyindent')
 unregister_replacement = (
-    f'{indent}if (mDeviceStateReceiver != null) {{\n'
-    f'{bodyindent}mDeviceStateReceiver.unregisterModernNetworkCallback(this);\n'
-    f'{bodyindent}unregisterReceiver(mDeviceStateReceiver);\n'
-    f'{indent}}}'
+    f'{indent}mDeviceStateReceiver.unregisterModernNetworkCallback(this);\n'
+    f'{indent}unregisterReceiver(mDeviceStateReceiver);'
 )
 s, count = re.subn(unregister_pattern, unregister_replacement, s, count=1, flags=re.MULTILINE)
 if count != 1:
