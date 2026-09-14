@@ -1,4 +1,4 @@
-name: Build Smart Open Connect 0.3.4
+name: Build Smart Open Connect 0.3.5
 
 on:
   workflow_dispatch:
@@ -10,6 +10,7 @@ on:
       - smart-openconnect-0.3.2-signing.py
       - smart-openconnect-0.3.3-release.py
       - smart-openconnect-0.3.4-release.py
+      - smart-openconnect-0.3.5-network-change.py
       - .github/workflows/**
 
 jobs:
@@ -27,6 +28,7 @@ jobs:
           test -s smart-openconnect-0.3.2-signing.py
           test -s smart-openconnect-0.3.3-release.py
           test -s smart-openconnect-0.3.4-release.py
+          test -s smart-openconnect-0.3.5-network-change.py
 
       - uses: actions/setup-java@v4
         with:
@@ -195,6 +197,18 @@ jobs:
           grep -q 'putString(ConnectFragment.PREF_SELECTED_PROFILE, profile.getUUIDString()).commit();' source/app/src/main/java/net/openconnect_vpn/android/fragments/VPNProfileList.java
           test "$(grep -o 'android:id="@+id/recent_profile_' source/app/src/main/res/layout/connect.xml | wc -l)" -eq 3
 
+      - name: Apply 0.3.5 network change behavior fix
+        run: |
+          python3 smart-openconnect-0.3.5-network-change.py
+          grep -q 'versionCode 8' source/app/build.gradle
+          grep -q 'versionName "0.3.5"' source/app/build.gradle
+          grep -q 'network changed: reconnecting VPN on new network' source/app/src/main/java/net/openconnect_vpn/android/core/DeviceStateReceiver.java
+          grep -q 'network changed: reconnect disabled; disconnecting VPN' source/app/src/main/java/net/openconnect_vpn/android/core/DeviceStateReceiver.java
+          grep -q 'mPrefs.getBoolean("netchangereconnect", true)' source/app/src/main/java/net/openconnect_vpn/android/core/DeviceStateReceiver.java
+          ! grep -q 'mNetchangeReconnect' source/app/src/main/java/net/openconnect_vpn/android/core/DeviceStateReceiver.java
+          ! grep -q 'new String\[\] { "netchangereconnect", "screenoff", "trace_log" }' source/app/src/main/java/net/openconnect_vpn/android/fragments/GeneralSettings.java
+          grep -q 'When disabled, changing networks disconnects the VPN' source/app/src/main/res/values/strings.xml
+
       - name: Build native arm64-v8a
         run: |
           NDK_PATH="${ANDROID_HOME}/ndk/27.2.12479018"
@@ -221,26 +235,26 @@ jobs:
             --ks-key-alias androiddebugkey \
             --ks-pass pass:android \
             --key-pass pass:android \
-            --out SmartOpenConnect-0.3.4-arm64.apk \
+            --out SmartOpenConnect-0.3.5-arm64.apk \
             source/app/build/outputs/apk/debug/app-debug.apk
-          test -s SmartOpenConnect-0.3.4-arm64.apk
+          test -s SmartOpenConnect-0.3.5-arm64.apk
 
       - name: Verify release metadata and signature
         run: |
-          SIG="$($ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs SmartOpenConnect-0.3.4-arm64.apk)"
+          SIG="$($ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs SmartOpenConnect-0.3.5-arm64.apk)"
           printf '%s\n' "$SIG"
           printf '%s\n' "$SIG" | grep -Fi 'Signer #1 certificate SHA-256 digest: d51b2b0cb320aad16261641a1dcec7ce92ccd6a9dc29dd702db95e8b58b1c2cc'
-          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging SmartOpenConnect-0.3.4-arm64.apk | tee apk-badging.txt
-          grep -q "versionCode='7'" apk-badging.txt
-          grep -q "versionName='0.3.4'" apk-badging.txt
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging SmartOpenConnect-0.3.5-arm64.apk | tee apk-badging.txt
+          grep -q "versionCode='8'" apk-badging.txt
+          grep -q "versionName='0.3.5'" apk-badging.txt
           grep -q "application-label:'Smart Open Connect'" apk-badging.txt
 
       - name: Checksum
-        run: sha256sum SmartOpenConnect-0.3.4-arm64.apk > SmartOpenConnect-0.3.4-arm64.apk.sha256
+        run: sha256sum SmartOpenConnect-0.3.5-arm64.apk > SmartOpenConnect-0.3.5-arm64.apk.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SmartOpenConnect-0.3.4-arm64
+          name: SmartOpenConnect-0.3.5-arm64
           path: |
-            SmartOpenConnect-0.3.4-arm64.apk
-            SmartOpenConnect-0.3.4-arm64.apk.sha256
+            SmartOpenConnect-0.3.5-arm64.apk
+            SmartOpenConnect-0.3.5-arm64.apk.sha256
