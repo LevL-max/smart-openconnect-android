@@ -35,7 +35,7 @@ jobs:
             -alias androiddebugkey | \
             grep -F 'SHA256: D5:1B:2B:0C:B3:20:AA:D1:62:61:64:1A:1D:CE:C7:CE:92:CC:D6:A9:DC:29:DD:70:2D:B9:5E:8B:58:B1:C2:CC'
 
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
 
       - name: Install SDK and NDK
         run: |
