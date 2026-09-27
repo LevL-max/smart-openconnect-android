@@ -1,4 +1,4 @@
-# Smart Open Connect 0.3.10 - stale Connect / TLS recovery test build
+# Smart Open Connect 0.3.10 - stale Connect / TLS recovery
 
 ## Problem reproduced
 
@@ -17,7 +17,7 @@ The observed failure is consistent with stale process-local OpenConnect state or
 
 ### 1. Manual Connect no longer overlaps an older VPN thread
 
-Before starting a fresh manual connection, 0.3.10 stops the previous OpenConnect management session.
+Before starting a fresh manual connection, Smart Open Connect stops the previous OpenConnect management session.
 
 If the old Java/native VPN thread is still alive after the normal stop/join period, the app does **not** start a second OpenConnect session beside it. Instead it hands the connection to the same controlled full-session restart path introduced in 0.3.9 for network changes:
 
@@ -76,7 +76,7 @@ If there is no alternate healthy candidate, the same relay may be retried once.
 - Smart Relay discovery and Java TCP/TLS pre-probing remain unchanged.
 - Original VPN hostname remains the logical TLS/SNI/authentication identity.
 - Saved credentials remain one-tap when all required values are present.
-- 0.3.9 network-change full reconnect behavior remains in place.
+- Full-session network-change reconnect behavior remains in place.
 - Signing key remains the existing Smart Open Connect persistent signing key.
 - Build remains arm64-v8a.
 
@@ -84,5 +84,8 @@ If there is no alternate healthy candidate, the same relay may be retried once.
 
 - Version name: **0.3.10**
 - Version code: **13**
-- Base: OpenConnect for Android 1.12 + Smart Open Connect 0.3.9 overlays
-- Purpose: device test before any stable release publication
+- Base client: **OpenConnect for Android 1.12**
+- Status: **stable release**
+- Architecture: **arm64-v8a**
+- GitHub Actions build: **36339524568**
+- APK SHA-256: **eba93c20bd253abce64741238232700c08c3fc886dbe148c7528f6c645803976**
