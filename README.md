@@ -4,9 +4,9 @@
 
 It keeps the normal OpenConnect profile, hostname, authentication flow and TLS identity, but chooses a usable physical relay before the real VPN connection starts.
 
-Current public release: **v0.3.9**
+Current stable release: **v0.3.10**
 
-- [Download Smart Open Connect v0.3.9](https://github.com/LevL-max/smart-openconnect-android/releases/tag/v0.3.9)
+- [Download Smart Open Connect v0.3.10](https://github.com/LevL-max/smart-openconnect-android/releases/tag/v0.3.10)
 - Android: API 23+
 - ABI: arm64-v8a
 - Base client: OpenConnect for Android 1.12
@@ -206,7 +206,7 @@ Credentials are not hard-coded into the application or repository.
 
 ## Reconnect on Network Change
 
-Smart Open Connect 0.3.9 gives this option explicit behavior.
+Smart Open Connect gives this option explicit behavior.
 
 ### Option disabled
 
@@ -252,7 +252,7 @@ establish VPN on the new network
 
 This matters because the upstream-style in-session reconnect can tear down the old tunnel without reliably creating a usable new session after the physical uplink changes.
 
-The 0.3.9 restart path includes several guards:
+The current restart path includes several guards:
 
 - duplicate network-change events cannot schedule multiple simultaneous reconnects;
 - manual Disconnect cancels a pending automatic reconnect;
@@ -261,7 +261,17 @@ The 0.3.9 restart path includes several guards:
 
 The setting is read when a real network-change event occurs. Simply toggling the checkbox in Settings does not immediately restart or manipulate the active VPN, which also avoids the previous Settings UI delay.
 
-The final 0.3.9 behavior was tested on-device in both directions between Wi-Fi and mobile data before publication.
+This reconnect behavior was tested on-device in both directions between Wi-Fi and mobile data before publication.
+
+## Stale Connect / TLS recovery
+
+The current stable release also protects manual Connect after the app has been idle or backgrounded.
+
+Before a new manual connection starts, the service makes sure an older OpenConnect management thread is not still alive. If stale process-local state is detected, the old session is stopped and the client waits for it to terminate before creating a fresh OpenConnect session.
+
+During the native connection attempt, a watchdog is armed when libopenconnect reaches `SSL negotiation with ...`. If that stage makes no progress for **10 seconds**, the stuck native attempt is cancelled and destroyed, then the client performs **one fresh-session retry**. With Smart Relay enabled, the retry prefers another healthy probed relay when one is available.
+
+This recovery is intentionally bounded to one retry so a bad endpoint or credential condition cannot create an automatic reconnect loop.
 
 ## Connect screen
 
@@ -344,19 +354,19 @@ Signing certificate SHA-256 fingerprint:
 D5:1B:2B:0C:B3:20:AA:D1:62:61:64:1A:1D:CE:C7:CE:92:CC:D6:A9:DC:29:DD:70:2D:B9:5E:8B:58:B1:C2:CC
 ```
 
-## What is not in the final 0.3.9 release
+## Experimental network monitor not used
 
 An experimental 0.3.7 build introduced a separate modern Android physical-network monitor using `NetworkCallback`. It caused a connection-start regression during device testing and was not published as a stable release.
 
-That experimental monitor is **not present** in the final 0.3.9 APK.
+That experimental monitor is **not present** in the current stable APK.
 
-The published 0.3.9 runtime is based on the stable pre-0.3.7 path plus the tested full-session reconnect implementation described above.
+The current stable runtime is based on the stable pre-0.3.7 path plus the tested full-session reconnect implementation described above.
 
 ## Current limitations
 
-Known limitations in v0.3.9:
+Current limitations:
 
-- **No same-attempt relay failover yet.** If the selected relay passes the pre-probe and then fails during the real OpenConnect connection, the current attempt does not automatically continue with candidate #2. Pressing Connect again performs a fresh selection pass.
+- **Same-attempt failover is currently limited to TLS-hang recovery.** If native TLS negotiation stalls, the client cancels the stuck attempt, creates a fresh OpenConnect session and retries once, preferring another healthy Smart Relay candidate when available. Other post-probe failures still require a new Connect attempt.
 - **The relay cache is additive.** Cached candidates are re-probed, but there is no time-based aging/failure cooldown model yet.
 - **No DNS-first fast path yet.** The selector still builds the broader candidate pool before probing it.
 - **arm64-v8a only** in the current published APK.
@@ -396,33 +406,33 @@ The native library is rebuilt because Smart Relay includes JNI/native resolver-o
 
 Latest release:
 
-**Smart Open Connect v0.3.9**
+**Smart Open Connect v0.3.10**
 
 APK:
 
 ```text
-SmartOpenConnect-0.3.9-arm64.apk
+SmartOpenConnect-0.3.10-arm64.apk
 ```
 
 SHA-256:
 
 ```text
-fc6fff1ad52933681fe171375ea23229ee3053c9761c4788cfb4d93191c54d83
+eba93c20bd253abce64741238232700c08c3fc886dbe148c7528f6c645803976
 ```
 
 Tested source commit:
 
 ```text
-ded2c00d4da7f503b96b0b09205b13db3a366afd
+767de5c8f6d227eb87c103d7783491cacd7488a1
 ```
 
 GitHub Actions build:
 
 ```text
-34818348752
+36339524568
 ```
 
-The v0.3.9 release APK is the exact artifact that passed the device test. Publication does not rebuild the APK.
+The v0.3.10 release APK is the exact artifact that passed the device build and verification workflow. Publication does not rebuild the APK.
 
 ## Upstream and license
 
